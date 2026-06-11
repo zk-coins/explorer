@@ -1,0 +1,16 @@
+# Dependencies & build output
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+coverage/
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.pem
+
+# OS / editor
+.DS_Store
