@@ -4,7 +4,7 @@
 
 The **public block/transaction explorer** for zkCoins — a stateless web frontend that renders the public on-chain projection and, given a per-coin view capability, an authorised single-transaction view. It holds **no keys** and only reads a node's public endpoints.
 
-> Full system docs: **[docs.zkcoins.app](https://docs.zkcoins.app)** · Specification: **[docs.zkcoins.app/specification](https://docs.zkcoins.app/specification)**
+> Full system docs: **[docs.zkcoins.com](https://docs.zkcoins.com)** · Specification: **[docs.zkcoins.com/specification](https://docs.zkcoins.com/specification)**
 
 ## What zkCoins is
 
@@ -24,16 +24,16 @@ Supporting repos: [`zk-coins/research`](https://github.com/zk-coins/research), [
 
 ## This repository (explorer)
 
-A **stateless presentation surface** — its own container, a sibling of the wallet [app](https://github.com/zk-coins/app). It holds no keys and no private state; everything it shows is read from a node's **public** endpoints ([specification §7.5](https://docs.zkcoins.app/specification)) and verified against Bitcoin.
+A **stateless presentation surface** — its own container, a sibling of the wallet [app](https://github.com/zk-coins/app). It holds no keys and no private state; everything it shows is read from a node's **public** endpoints ([specification §7.5](https://docs.zkcoins.com/specification)) and verified against Bitcoin.
 
-Two modes ([§5.5](https://docs.zkcoins.app/specification)):
+Two modes ([§5.5](https://docs.zkcoins.com/specification)):
 
 - **Public mode** — renders only Public on-chain data: the stream of `BatchInscription`s with their `prev_root → new_root` transitions and publisher identities, the global nullifier accumulator, and aggregate counts. No amounts, addresses, or parties.
-- **Authorised mode** — given a shareable per-coin view capability (`zkview`), an account view key (`zkavk`), or a balance attestation, applied **client-side**, it decrypts and renders exactly that disclosure ([§5](https://docs.zkcoins.app/specification)) and verifies the confirmation against Bitcoin.
+- **Authorised mode** — given a shareable per-coin view capability (`zkview`), an account view key (`zkavk`), or a balance attestation, applied **client-side**, it decrypts and renders exactly that disclosure ([§5](https://docs.zkcoins.com/specification)) and verifies the confirmation against Bitcoin.
 
 It offers **no** publisher and **no** wallet API. It MAY reuse [`@zkcoins/sdk`](https://github.com/zk-coins/sdk) as its node client.
 
-> **Status: scaffold.** This repo will hold the explorer frontend (`zkcoins.space`). The full design is specified in [§5 Access & Explorer](https://docs.zkcoins.app/specification) and [§6.1](https://docs.zkcoins.app/specification).
+> **Status: scaffold.** This repo will hold the explorer frontend (`zkcoins.space`). The full design is specified in [§5 Access & Explorer](https://docs.zkcoins.com/specification) and [§6.1](https://docs.zkcoins.com/specification).
 
 ## License
 
