@@ -29,7 +29,7 @@ A **stateless presentation surface** — its own container, a sibling of the wal
 Two modes ([§5.5](https://docs.zkcoins.com/specification)):
 
 - **Public mode** — L1-anchor layer only: the stream of `AggregateStateNullifierV3` nullifier inscriptions with their half-aggregated `(Pkⱼ, Rⱼ)` sets and publisher identities (reveal transaction), the global nullifier accumulator folded from them by first-occurrence (`size`, `nav_root`), and aggregate counts (inscription count, transitions per block, accumulator size). §3.10 states (`pending` / `completed` / `failed`) come from the node data and are never guessed client-side. **No** amounts, `asset_id`s, balances, addresses, senders, recipients, CoinProof material, or UTXO/output graph — zkCoins is an account model.
-- **Authorised / bearer mode** — shareable fragment links (`/tx#…`, `/balance#…`, `/addr#…`) carry Bech32m secrets (`zkview`, `zkavk`, `zkatt`, `zkbid`) in the URL **fragment only** so they never reach the server. HRPs are parsed and validated client-side; decryption and verification are the next implementation block (routes currently show an honest “not yet implemented” after a successful parse).
+- **Authorised / bearer mode** — shareable fragment links (`/tx#…`, `/balance#…`, `/addr#…`) carry Bech32m secrets (`zkview`, `zkavk`, `zkatt`, `zkbid`) in the URL **fragment only** so they never reach the server. The client fetches content-addressed blobs, opens ZBE under the bearer secret, and renders an explicit pass/fail/open checklist — never a silent “verified” without the check behind it.
 
 Navigation keeps the §5.5 two-layer boundary visible: Public (L1 anchor) vs Authorised/bearer (account layer).
 
@@ -52,7 +52,7 @@ npm run build
 
 A build **without** `NEXT_PUBLIC_NODE_BASE_URL` must fail.
 
-> **Status:** Public mode implemented against §5.5 / §7.5 (inscription stream, accumulator, nullifier lookup, aggregate counts, fragment HRP validation). Authorised/bearer decryption and proof verification are not yet implemented.
+> **Status:** Public mode (§5.5 / §7.5) and authorised/bearer fragment routes (§5.6–§5.8) with client-side ZBE open and honest open steps for checks the explorer cannot run (Plonky2, own-scan first-occurrence, full Nostr mesh discovery).
 
 ## License
 

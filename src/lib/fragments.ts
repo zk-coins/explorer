@@ -21,10 +21,9 @@
  * browser has the full URL including the hash.
  * ─────────────────────────────────────────────────────────────────────────
  *
- * Decryption and proof verification (Authorised / bearer mode) are the next
- * implementation block. After a successful parse this layer returns a typed
- * structure so the UI can show an honest "not yet implemented" state — never
- * an empty success.
+ * After a successful parse this layer returns a typed structure; Authorised /
+ * bearer decryption and verification run client-side in the bearer modules
+ * (§5.6–§5.8). A successful parse alone is not a disclosure success.
  */
 
 import { Bech32mError, decodeBech32m, decodeExplorerBech32m, EXPLORER_HRPS } from '@/lib/bech32m';

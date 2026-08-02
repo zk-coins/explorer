@@ -29,6 +29,8 @@ const nextConfig = {
     unoptimized: true,
   },
   trailingSlash: true,
+  // Local monorepo SDK (file:../sdk) is ESM and must be transpiled by Next.
+  transpilePackages: ['@zkcoins/sdk'],
 };
 
 module.exports = nextConfig;

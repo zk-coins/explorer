@@ -1,7 +1,12 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { CheckList } from '@/components/CheckList';
 import { ErrorState } from '@/components/ErrorState';
+import { StateBadge } from '@/components/StateBadge';
+import { resolveAddressView, type AddressViewResult } from '@/lib/bearer/addressView';
+import { resolveBalanceAttestation, type BalanceAttestationView } from '@/lib/bearer/balance';
+import { resolveConfirmationLink, type ConfirmationView } from '@/lib/bearer/confirmation';
 import {
   parseAddrFragment,
   parseBalanceFragment,
@@ -49,6 +54,40 @@ export function BearerRoutePanel({ kind }: { kind: Kind }) {
 }
 
 function TxBody({ result }: { result: TxFragmentResult | null }) {
+  const [view, setView] = useState<ConfirmationView | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (result === null || result.status !== 'ok') {
+      setView(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    resolveConfirmationLink(result)
+      .then((v) => {
+        if (!cancelled) {
+          setView(v);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setView({
+            checks: [],
+            fatalError: err instanceof Error ? err.message : String(err),
+          });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [result]);
+
   if (result === null) {
     return <p className="text-sm text-ink3">Reading fragment…</p>;
   }
@@ -60,15 +99,102 @@ function TxBody({ result }: { result: TxFragmentResult | null }) {
   if (result.status === 'error') {
     return <ErrorState title="Invalid confirmation link" message={result.message} />;
   }
+  if (loading || view === null) {
+    return <p className="text-sm text-ink3">Decrypting confirmation…</p>;
+  }
+
   return (
-    <NotYetImplemented
-      title="Transaction disclosure"
-      detail={`Parsed zkbid (${result.bundle.length} B) and zkview (${result.view.length} B). Decryption and Bitcoin verification are not implemented in this block.`}
-    />
+    <div data-testid="confirmation-view" className="space-y-4">
+      {view.fatalError !== undefined && (
+        <ErrorState title="Confirmation failed" message={view.fatalError} />
+      )}
+      {view.state !== undefined && (
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-ink2">§3.10 state</span>
+          <StateBadge state={view.state} />
+        </div>
+      )}
+      {view.coin !== undefined && (
+        <section
+          data-testid="coin-fields"
+          className="space-y-1 rounded border border-line bg-surface p-4 text-sm"
+        >
+          <h3 className="font-medium">Coin</h3>
+          <Field label="amount" value={view.coin.amount} />
+          <Field label="asset_id" value={view.coin.assetIdHex} mono />
+          <Field label="recipient" value={view.coin.recipientHex} mono />
+          <Field label="identifier" value={view.coin.identifierHex} mono />
+          {view.assetTermsName !== undefined && (
+            <Field label="asset name" value={view.assetTermsName} />
+          )}
+        </section>
+      )}
+      {view.creatingNullifier !== undefined && (
+        <section
+          data-testid="anchoring-trail"
+          className="space-y-1 rounded border border-line bg-surface p-4 text-sm"
+        >
+          <h3 className="font-medium">Anchoring trail</h3>
+          <Field label="Pk_create" value={view.creatingNullifier.pkCreateHex} mono />
+          <Field label="R_create" value={view.creatingNullifier.rCreateHex} mono />
+          {view.anchoring?.revealTxid !== undefined && (
+            <Field label="reveal txid" value={view.anchoring.revealTxid} mono />
+          )}
+          {view.anchoring?.height !== undefined && (
+            <Field label="height" value={String(view.anchoring.height)} />
+          )}
+          {view.anchoring?.confirmations !== undefined && (
+            <Field label="confirmations" value={String(view.anchoring.confirmations)} />
+          )}
+          {view.anchoring?.tipHeight !== undefined && (
+            <Field label="tip_height" value={String(view.anchoring.tipHeight)} />
+          )}
+          {view.navOpening !== undefined && <Field label="nav size" value={view.navOpening.size} />}
+        </section>
+      )}
+      <section className="space-y-2">
+        <h3 className="text-sm font-medium">Verification checklist (§5.6)</h3>
+        <CheckList checks={view.checks} />
+      </section>
+    </div>
   );
 }
 
 function BalanceBody({ result }: { result: BalanceFragmentResult | null }) {
+  const [view, setView] = useState<BalanceAttestationView | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (result === null || result.status !== 'ok') {
+      setView(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    resolveBalanceAttestation(result)
+      .then((v) => {
+        if (!cancelled) {
+          setView(v);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setView({
+            checks: [],
+            fatalError: err instanceof Error ? err.message : String(err),
+          });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [result]);
+
   if (result === null) {
     return <p className="text-sm text-ink3">Reading fragment…</p>;
   }
@@ -83,15 +209,81 @@ function BalanceBody({ result }: { result: BalanceFragmentResult | null }) {
   if (result.status === 'error') {
     return <ErrorState title="Invalid balance link" message={result.message} />;
   }
+  if (loading || view === null) {
+    return <p className="text-sm text-ink3">Verifying balance attestation…</p>;
+  }
+
   return (
-    <NotYetImplemented
-      title="Balance attestation"
-      detail={`Parsed address, asset_id, and attestation form "${result.attestationForm}". Verification is not implemented in this block.`}
-    />
+    <div data-testid="balance-attestation-view" className="space-y-4">
+      {view.fatalError !== undefined && (
+        <ErrorState title="Attestation failed" message={view.fatalError} />
+      )}
+      {view.fields !== undefined && (
+        <section
+          data-testid="attestation-fields"
+          className="space-y-1 rounded border border-line bg-surface p-4 text-sm"
+        >
+          <h3 className="font-medium">BalanceAttestation public inputs</h3>
+          <Field label="subject" value={view.fields.subjectHex} mono />
+          <Field label="asset_id" value={view.fields.assetIdHex} mono />
+          <Field label="balance" value={view.fields.balance} />
+          <Field label="nav_ceiling" value={view.fields.navCeilingHex} mono />
+          <Field label="size_ceiling" value={view.fields.sizeCeiling} />
+          <Field label="anchor.txid" value={view.fields.txidHex} mono />
+          <Field label="anchor.block_hash" value={view.fields.blockHashHex} mono />
+          <Field label="anchor.height" value={view.fields.height} />
+          <Field label="Pk_anchor" value={view.fields.pkAnchorHex} mono />
+          <Field label="R_anchor" value={view.fields.rAnchorHex} mono />
+          <Field label="network_id" value={view.fields.networkIdHex} mono />
+          <Field label="proof length" value={String(view.fields.proofLen)} />
+        </section>
+      )}
+      <section className="space-y-2">
+        <h3 className="text-sm font-medium">Verification checklist (§5.7)</h3>
+        <CheckList checks={view.checks} />
+      </section>
+    </div>
   );
 }
 
 function AddrBody({ result }: { result: AddrFragmentResult | null }) {
+  const [view, setView] = useState<AddressViewResult | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (result === null || result.status !== 'ok') {
+      setView(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    resolveAddressView(result)
+      .then((v) => {
+        if (!cancelled) {
+          setView(v);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setView({
+            mode: result.avkByteLength === 32 ? 'incoming_only' : 'full',
+            addressHex: '',
+            checks: [],
+            history: [],
+            fatalError: err instanceof Error ? err.message : String(err),
+          });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [result]);
+
   if (result === null) {
     return <p className="text-sm text-ink3">Reading fragment…</p>;
   }
@@ -106,11 +298,87 @@ function AddrBody({ result }: { result: AddrFragmentResult | null }) {
   if (result.status === 'error') {
     return <ErrorState title="Invalid account view link" message={result.message} />;
   }
+  if (loading || view === null) {
+    return <p className="text-sm text-ink3">Opening account view…</p>;
+  }
+
   return (
-    <NotYetImplemented
-      title="Account view"
-      detail={`Parsed address and zkavk (${result.avkByteLength} B). History decrypt is not implemented in this block.`}
-    />
+    <div data-testid="address-view" className="space-y-4">
+      {view.fatalError !== undefined && (
+        <ErrorState title="Account view failed" message={view.fatalError} />
+      )}
+      <section className="rounded border border-line bg-surface p-4 text-sm">
+        <h3 className="font-medium">Account view mode</h3>
+        <p data-testid="avk-mode" className="mt-1 font-mono text-xs text-ink2">
+          {view.mode === 'full' ? 'full (ivk ‖ ovk, 64 B)' : 'incoming-only (ivk, 32 B)'}
+        </p>
+        {view.addressHex.length > 0 && <Field label="address" value={view.addressHex} mono />}
+      </section>
+
+      <section data-testid="history-list" className="space-y-2">
+        <h3 className="text-sm font-medium">History</h3>
+        {view.history.length === 0 && (
+          <p className="text-sm text-ink3">No discovered entries yet.</p>
+        )}
+        {view.history.map((entry, i) => {
+          if (entry.side === 'incoming') {
+            return (
+              <div
+                key={`in-${i}`}
+                data-testid="history-incoming"
+                className="rounded border border-line bg-surface p-3 text-sm"
+              >
+                <p className="text-xs uppercase tracking-wide text-ink3">incoming</p>
+                <Field label="amount" value={entry.coin.amount} />
+                <Field label="asset_id" value={entry.coin.assetIdHex} mono />
+                <Field label="Pk_create" value={entry.creatingPkHex} mono />
+              </div>
+            );
+          }
+          if (entry.status === 'not_derivable') {
+            return (
+              <div
+                key={`out-nd-${i}`}
+                data-testid="history-outgoing-not-derivable"
+                className="rounded border border-warn/40 bg-warn/10 p-3 text-sm"
+              >
+                <p className="text-xs uppercase tracking-wide text-warn">
+                  outgoing · not derivable
+                </p>
+                <p className="mt-1 text-ink2">{entry.reason}</p>
+              </div>
+            );
+          }
+          return (
+            <div
+              key={`out-${i}`}
+              data-testid="history-outgoing"
+              className="rounded border border-line bg-surface p-3 text-sm"
+            >
+              <p className="text-xs uppercase tracking-wide text-ink3">outgoing · recovered</p>
+              <Field label="coin_id" value={entry.coinIdHex} mono />
+              {entry.coin !== undefined && <Field label="amount" value={entry.coin.amount} />}
+            </div>
+          );
+        })}
+      </section>
+
+      <section className="space-y-2">
+        <h3 className="text-sm font-medium">Verification checklist (§5.8)</h3>
+        <CheckList checks={view.checks} />
+      </section>
+    </div>
+  );
+}
+
+function Field({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+      <span className="text-ink3">{label}</span>
+      <span className={mono === true ? 'break-all font-mono text-xs text-ink' : 'text-ink'}>
+        {value}
+      </span>
+    </div>
   );
 }
 
@@ -126,23 +394,6 @@ function EmptyFragment({ title, grammar }: { title: string; grammar: string }) {
         query string.
       </p>
       <p className="font-mono text-xs text-ink3">{grammar}</p>
-    </div>
-  );
-}
-
-function NotYetImplemented({ title, detail }: { title: string; detail: string }) {
-  return (
-    <div
-      data-testid="not-yet-implemented"
-      className="space-y-2 rounded border border-line bg-surface p-4"
-    >
-      <h2 className="text-base font-medium">{title}</h2>
-      <p className="text-sm text-bitcoin">Not yet implemented</p>
-      <p className="text-sm text-ink2">{detail}</p>
-      <p className="text-xs text-ink3">
-        Authorised / bearer decryption and verification is the next implementation block. A
-        successful fragment parse is not a disclosure success.
-      </p>
     </div>
   );
 }

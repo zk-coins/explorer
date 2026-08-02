@@ -1,8 +1,9 @@
 # Contributing to zkCoins Explorer
 
-> **Status:** Public mode is implemented against specification §5.5 / §7.5.
-> Authorised/bearer decryption and verification are the next block. The app is a
-> stateless static export (`zkcoins.space`) — no keys, no server state.
+> **Status:** Public mode (§5.5 / §7.5) and authorised/bearer fragment routes
+> (§5.6 confirmation, §5.7 balance attestation, §5.8 address view) with client-side
+> ZBE open. The app is a stateless static export (`zkcoins.space`) — no keys, no
+> server state.
 
 ## What belongs here
 

@@ -25,13 +25,23 @@ describe('fragment parsing', () => {
     expect(result.status).toBe('error');
   });
 
-  it('parses a valid addr fragment (zk/zkavk)', () => {
+  it('parses a valid addr fragment (zk/zkavk 64 B → full mode)', () => {
     const address = encodeBech32m(EXPLORER_HRPS.zk, p(32, 3));
     const avk = encodeBech32m(EXPLORER_HRPS.zkavk, p(64, 4));
     const result = parseAddrFragment(`#${address}/${avk}`);
     expect(result.status).toBe('ok');
     if (result.status === 'ok') {
       expect(result.avkByteLength).toBe(64);
+    }
+  });
+
+  it('parses zkavk 32 B → incoming-only mode', () => {
+    const address = encodeBech32m(EXPLORER_HRPS.zk, p(32, 3));
+    const avk = encodeBech32m(EXPLORER_HRPS.zkavk, p(32, 4));
+    const result = parseAddrFragment(`#${address}/${avk}`);
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.avkByteLength).toBe(32);
     }
   });
 
