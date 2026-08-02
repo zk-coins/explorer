@@ -3,10 +3,13 @@
  *
  * Endpoints: GET /v1/info, /v1/chain/inscriptions, /v1/chain/accumulator,
  * /v1/chain/nullifier/<pk>. No capability, no bearer secret, no private data.
+ *
+ * Wire parsers are fail-closed: negative / non-integer / unsafe numbers,
+ * non-canonical hex, open format values, and inconsistent counts reject the
+ * whole response rather than rendering a seemingly valid UI.
  */
 
 import { NODE_BASE_URL } from '@/lib/config';
-import { expectPresent } from '@/lib/expectPresent';
 import {
   NodeApiError,
   type AccumulatorResponse,
@@ -26,6 +29,15 @@ export interface FetchInscriptionsOpts {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
 }
+
+/** Closed inscription format set (AggregateStateNullifierV3 §3.5). */
+const INSCRIPTION_FORMATS = new Set([0, 1]);
+const NETWORKS = new Set(['mainnet', 'testnet', 'regtest']);
+const NULLIFIER_STATES = new Set(['pending', 'completed', 'failed']);
+const CONFIRMATION_STATES = new Set(['pending', 'completed']);
+
+/** Lowercase hex of exactly `byteLen` bytes (2*byteLen chars). */
+const HEX32_RE = /^[0-9a-f]{64}$/;
 
 function resolveBase(baseUrl: string | undefined): string {
   if (baseUrl !== undefined) {
@@ -92,16 +104,47 @@ function requireString(obj: Record<string, unknown>, key: string, ctx: string): 
   return v;
 }
 
-function requireNumber(obj: Record<string, unknown>, key: string, ctx: string): number {
+/**
+ * Non-negative safe integer (u32-compatible width for JSON numbers that must
+ * stay exact in JS). Rejects floats, negatives, NaN, and > MAX_SAFE_INTEGER.
+ */
+function requireNonNegSafeInt(
+  obj: Record<string, unknown>,
+  key: string,
+  ctx: string,
+  opts: { max?: number } = {},
+): number {
   const v = obj[key];
-  if (typeof v !== 'number' || !Number.isFinite(v)) {
+  if (typeof v !== 'number' || !Number.isInteger(v) || !Number.isSafeInteger(v) || v < 0) {
     throw new NodeApiError(
       200,
       'malformed_response',
-      `${ctx}: missing or non-numeric field "${key}"`,
+      `${ctx}: field "${key}" must be a non-negative safe integer, got ${JSON.stringify(v)}`,
+    );
+  }
+  if (opts.max !== undefined && v > opts.max) {
+    throw new NodeApiError(
+      200,
+      'malformed_response',
+      `${ctx}: field "${key}" exceeds max ${opts.max}, got ${v}`,
     );
   }
   return v;
+}
+
+/**
+ * u32 wire field: non-negative safe integer ≤ 0xffffffff.
+ */
+function requireU32(obj: Record<string, unknown>, key: string, ctx: string): number {
+  return requireNonNegSafeInt(obj, key, ctx, { max: 0xffffffff });
+}
+
+/**
+ * u64-as-JSON number: non-negative safe integer (exact representation only).
+ * Values above Number.MAX_SAFE_INTEGER must not be accepted silently.
+ */
+function requireU64Safe(obj: Record<string, unknown>, key: string, ctx: string): number {
+  return requireNonNegSafeInt(obj, key, ctx);
 }
 
 function requireArray(obj: Record<string, unknown>, key: string, ctx: string): unknown[] {
@@ -116,9 +159,18 @@ function requireArray(obj: Record<string, unknown>, key: string, ctx: string): u
   return v;
 }
 
-const NETWORKS = new Set(['mainnet', 'testnet', 'regtest']);
-const NULLIFIER_STATES = new Set(['pending', 'completed', 'failed']);
-const CONFIRMATION_STATES = new Set(['pending', 'completed']);
+/** Canonical 32-byte lowercase hex (64 chars, 0-9a-f only). */
+function requireHex32(obj: Record<string, unknown>, key: string, ctx: string): string {
+  const v = requireString(obj, key, ctx);
+  if (!HEX32_RE.test(v)) {
+    throw new NodeApiError(
+      200,
+      'malformed_response',
+      `${ctx}: field "${key}" must be 64-char lowercase hex (32 bytes), got length ${v.length}`,
+    );
+  }
+  return v;
+}
 
 export function parseInfoResponse(raw: unknown): InfoResponse {
   if (raw === null || typeof raw !== 'object') {
@@ -134,8 +186,13 @@ export function parseInfoResponse(raw: unknown): InfoResponse {
     );
   }
   const protocol_version = requireString(o, 'protocol_version', 'info');
-  const finality_confirmations = requireNumber(o, 'finality_confirmations', 'info');
-  const activation_height = requireNumber(o, 'activation_height', 'info');
+  const finality_confirmations = requireU32(o, 'finality_confirmations', 'info');
+  const activation_height = requireU64Safe(o, 'activation_height', 'info');
+  // §7.4 size gate — required; no silent default.
+  const max_blob_bytes = requireU64Safe(o, 'max_blob_bytes', 'info');
+  if (max_blob_bytes === 0) {
+    throw new NodeApiError(200, 'malformed_response', 'info: max_blob_bytes must be > 0');
+  }
   const featuresRaw = requireArray(o, 'features', 'info');
   const features: string[] = [];
   for (const f of featuresRaw) {
@@ -149,6 +206,7 @@ export function parseInfoResponse(raw: unknown): InfoResponse {
     protocol_version,
     finality_confirmations,
     activation_height,
+    max_blob_bytes,
     features,
   };
 }
@@ -159,10 +217,10 @@ export function parseAccumulatorResponse(raw: unknown): AccumulatorResponse {
   }
   const o = raw as Record<string, unknown>;
   return {
-    size: requireNumber(o, 'size', 'accumulator'),
-    root: requireString(o, 'root', 'accumulator'),
-    tip_block_hash: requireString(o, 'tip_block_hash', 'accumulator'),
-    tip_height: requireNumber(o, 'tip_height', 'accumulator'),
+    size: requireU64Safe(o, 'size', 'accumulator'),
+    root: requireHex32(o, 'root', 'accumulator'),
+    tip_block_hash: requireHex32(o, 'tip_block_hash', 'accumulator'),
+    tip_height: requireU64Safe(o, 'tip_height', 'accumulator'),
   };
 }
 
@@ -188,9 +246,9 @@ export function parseInscriptionsResponse(raw: unknown): InscriptionsResponse {
 
   const result: InscriptionsResponse = { inscriptions };
   if (cursorCount === 3) {
-    result.next_height = requireNumber(o, 'next_height', 'inscriptions');
-    result.next_tx_index = requireNumber(o, 'next_tx_index', 'inscriptions');
-    result.next_vin_index = requireNumber(o, 'next_vin_index', 'inscriptions');
+    result.next_height = requireU64Safe(o, 'next_height', 'inscriptions');
+    result.next_tx_index = requireU32(o, 'next_tx_index', 'inscriptions');
+    result.next_vin_index = requireU32(o, 'next_vin_index', 'inscriptions');
   }
   return result;
 }
@@ -216,13 +274,36 @@ function parseInscriptionEntry(
       `${ctx}: confirmation_state must be pending|completed, got ${JSON.stringify(confirmation_state)}`,
     );
   }
+  const count = requireU32(o, 'count', ctx);
+  if (count !== nullifiers.length) {
+    throw new NodeApiError(
+      200,
+      'malformed_response',
+      `${ctx}: count ${count} !== nullifiers.length ${nullifiers.length}`,
+    );
+  }
+  const format = requireU32(o, 'format', ctx);
+  if (!INSCRIPTION_FORMATS.has(format)) {
+    throw new NodeApiError(
+      200,
+      'malformed_response',
+      `${ctx}: format must be 0 (raw) or 1 (half-aggregated), got ${format}`,
+    );
+  }
+  if (format === 0 && count !== 1) {
+    throw new NodeApiError(
+      200,
+      'malformed_response',
+      `${ctx}: format 0 (raw) requires count === 1, got ${count}`,
+    );
+  }
   return {
-    txid: requireString(o, 'txid', ctx),
-    height: requireNumber(o, 'height', ctx),
-    tx_index: requireNumber(o, 'tx_index', ctx),
-    vin_index: requireNumber(o, 'vin_index', ctx),
-    count: requireNumber(o, 'count', ctx),
-    format: requireNumber(o, 'format', ctx),
+    txid: requireHex32(o, 'txid', ctx),
+    height: requireU64Safe(o, 'height', ctx),
+    tx_index: requireU32(o, 'tx_index', ctx),
+    vin_index: requireU32(o, 'vin_index', ctx),
+    count,
+    format,
     nullifiers,
     confirmation_state: confirmation_state as 'pending' | 'completed',
   };
@@ -245,8 +326,8 @@ function parseNullifierMember(
     );
   }
   return {
-    pubkey: requireString(o, 'pubkey', ctx),
-    r: requireString(o, 'r', ctx),
+    pubkey: requireHex32(o, 'pubkey', ctx),
+    r: requireHex32(o, 'r', ctx),
     state: state as 'pending' | 'completed' | 'failed',
   };
 }
@@ -261,12 +342,13 @@ export function parseNullifierLookupResponse(raw: unknown): NullifierLookupRespo
   }
   const auditRaw = requireArray(o, 'audit_path', 'nullifier');
   const audit_path: string[] = [];
-  for (const h of auditRaw) {
-    if (typeof h !== 'string') {
+  for (let i = 0; i < auditRaw.length; i++) {
+    const h = auditRaw[i];
+    if (typeof h !== 'string' || !HEX32_RE.test(h)) {
       throw new NodeApiError(
         200,
         'malformed_response',
-        'nullifier: audit_path entries must be hex strings',
+        `nullifier: audit_path[${i}] must be 64-char lowercase hex`,
       );
     }
     audit_path.push(h);
@@ -278,15 +360,15 @@ export function parseNullifierLookupResponse(raw: unknown): NullifierLookupRespo
   const base: NullifierLookupResponse = {
     present: o.present,
     audit_path,
-    tree_size: requireNumber(o, 'tree_size', 'nullifier'),
-    root: requireString(o, 'root', 'nullifier'),
-    tip_block_hash: requireString(o, 'tip_block_hash', 'nullifier'),
-    tip_height: requireNumber(o, 'tip_height', 'nullifier'),
+    tree_size: requireU64Safe(o, 'tree_size', 'nullifier'),
+    root: requireHex32(o, 'root', 'nullifier'),
+    tip_block_hash: requireHex32(o, 'tip_block_hash', 'nullifier'),
+    tip_height: requireU64Safe(o, 'tip_height', 'nullifier'),
   };
 
   if (o.present) {
-    base.position = requireNumber(o, 'position', 'nullifier (present)');
-    base.leaf = requireString(o, 'leaf', 'nullifier (present)');
+    base.position = requireU64Safe(o, 'position', 'nullifier (present)');
+    base.leaf = requireHex32(o, 'leaf', 'nullifier (present)');
   }
   return base;
 }
@@ -347,6 +429,3 @@ export async function fetchNullifier(
   const raw = await getJson<unknown>(path, opts);
   return parseNullifierLookupResponse(raw);
 }
-
-/** Re-export for tests that assert presence of the fail-closed helper. */
-export { expectPresent };

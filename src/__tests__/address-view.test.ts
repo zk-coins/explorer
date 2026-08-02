@@ -1,54 +1,21 @@
 /**
- * §5.8 address view — 32/64 B mode selection + outgoing not-derivable.
+ * §5.8 address view — 32/64 B mode selection + outgoing not-derivable / unresolved.
  */
 
 import { describe, expect, it } from 'vitest';
-import { buildAddressView, decryptIncomingBundle, selectAvkMode } from '@/lib/bearer/addressView';
-import { serializeCoinProof, type CoinProof } from '@/lib/bundle/coinProof';
+import {
+  buildAddressView,
+  decryptIncomingBundle,
+  resolveAddressView,
+  selectAvkMode,
+} from '@/lib/bearer/addressView';
+import { serializeCoinProof } from '@/lib/bundle/coinProof';
 import { encodeHexLower } from '@/lib/crypto/bytes';
 import { sharedSecretReceiver } from '@/lib/crypto/ecdh';
 import { deriveNoteKey } from '@/lib/crypto/hkdf';
 import { zbeSeal } from '@/lib/crypto/zbe';
 import type { AddrFragmentOk } from '@/lib/fragments';
-import { schnorr } from '@noble/curves/secp256k1.js';
-
-function fill(n: number, v: number): Uint8Array {
-  return Uint8Array.from({ length: n }, () => v);
-}
-
-function sampleCoinProof(recipient: Uint8Array): CoinProof {
-  return {
-    coin: {
-      identifier: fill(32, 1),
-      recipient,
-      amount: 42n,
-      assetId: fill(32, 2),
-    },
-    proof: fill(16, 3),
-    inclusionProof: fill(8, 4),
-    creatingPrevAsh: fill(32, 5),
-    creatingNullifier: {
-      pkCreate: fill(32, 6),
-      rCreate: fill(32, 7),
-      rPrimeCreate: fill(32, 8),
-    },
-    navOpening: {
-      size: 1n,
-      mth: fill(32, 9),
-      navRand: fill(32, 10),
-    },
-    epk: fill(32, 0), // overwritten by caller
-    ciphertext: fill(16, 11),
-    detectTag: fill(32, 12),
-  };
-}
-
-/** Valid secp256k1 scalar in [1, n) for ECDH tests. */
-function validScalar(seed: number): Uint8Array {
-  const s = fill(32, seed);
-  s[0] = 0x01; // ensure non-zero and < n for small seeds
-  return s;
-}
+import { digestLabel, fill, sampleCoinProof, validScalar, xOnlyFromSeed } from './fixtures/crypto';
 
 describe('§5.8 zkavk mode selection', () => {
   it('selects incoming-only for 32 B payload', () => {
@@ -89,9 +56,10 @@ describe('§5.8 address view build', () => {
     expect(outgoing[0]).toMatchObject({ status: 'not_derivable' });
     expect(view.checks.find((c) => c.id === 'outgoing_ivk_only')?.status).toBe('pass');
     expect(view.checks.find((c) => c.id === 'mesh_scan')?.status).toBe('open');
+    expect(view.historyNotResolvable).toBe(true);
   });
 
-  it('full mode does not inject not-derivable placeholder', () => {
+  it('full mode without discoveries is not resolvable (not empty history success)', async () => {
     const avk = new Uint8Array(64);
     avk.set(validScalar(3), 0);
     avk.set(validScalar(4), 32);
@@ -102,29 +70,55 @@ describe('§5.8 address view build', () => {
       avk,
       avkByteLength: 64,
     };
-    const view = buildAddressView(frag);
+    // Production path: resolveAddressView with no discoveries.
+    const view = await resolveAddressView(frag);
     expect(view.mode).toBe('full');
-    expect(view.history.some((h) => h.side === 'outgoing' && h.status === 'not_derivable')).toBe(
-      false,
-    );
+    expect(view.historyNotResolvable).toBe(true);
+    expect(view.checks.find((c) => c.id === 'mesh_scan')?.status).toBe('open');
+    expect(view.history.some((h) => h.side === 'outgoing' && h.status === 'recovered')).toBe(false);
+  });
+
+  it('marks outgoing without K_tx as unresolved (not recovered)', () => {
+    const avk = new Uint8Array(64);
+    avk.set(validScalar(3), 0);
+    avk.set(validScalar(4), 32);
+    const frag: AddrFragmentOk = {
+      status: 'ok',
+      kind: 'addr',
+      address: fill(32, 9),
+      avk,
+      avkByteLength: 64,
+    };
+    const view = buildAddressView(frag, {
+      outgoing: [
+        {
+          coinId: fill(32, 1),
+          blobId: fill(32, 2),
+          epk: xOnlyFromSeed(8),
+          // no kTx / zbeCiphertext
+        },
+      ],
+    });
+    const out = view.history.filter((h) => h.side === 'outgoing');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ status: 'unresolved' });
+    expect(out[0]?.status).not.toBe('recovered');
   });
 
   it('decrypts an incoming ZBE bundle under ivk', () => {
     const ivk = validScalar(5);
-    // epk = x-only of a second key
-    const esk = validScalar(6);
-    const epkPoint = schnorr.Point.BASE.multiply(
-      (() => {
-        let n = 0n;
-        for (const b of esk) n = (n << 8n) | BigInt(b);
-        return n;
-      })(),
-    );
-    const epk = epkPoint.toBytes(true).slice(1);
+    const epk = xOnlyFromSeed(6);
 
-    const recipient = fill(32, 0xaa);
-    const cp = sampleCoinProof(recipient);
-    cp.epk = epk;
+    const recipient = digestLabel('recipient/avk-test');
+    const cp = sampleCoinProof(7, {
+      coin: {
+        identifier: digestLabel('id/avk'),
+        recipient,
+        amount: 42n,
+        assetId: digestLabel('asset/avk'),
+      },
+      epk,
+    });
     const plain = serializeCoinProof(cp);
 
     // Seal under K_tx derived the same way the receiver will.
@@ -150,5 +144,6 @@ describe('§5.8 address view build', () => {
     expect(view.history.some((h) => h.side === 'outgoing' && h.status === 'not_derivable')).toBe(
       true,
     );
+    expect(view.historyNotResolvable).toBeUndefined();
   });
 });

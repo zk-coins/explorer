@@ -1,11 +1,21 @@
 /**
  * `serialize(CoinProof)` / deserialize — §1.5 / §7.1.
  *
- * Length-prefixed concatenation in declaration order. Opaque proof bytes are
- * carried through for presentation only; Plonky2 verification is an open step
- * the explorer cannot run in-browser.
+ * Length-prefixed concatenation in declaration order. After width parsing,
+ * digests, x-only curve points, and (when asset_terms is present) asset_id
+ * recomputation are validated. Opaque Plonky2 proof bytes are still not
+ * verified in-browser — that remains an open step.
  */
 
+import {
+  assetIdV1,
+  assetIdV2,
+  digestFromBytes,
+  digestToBytes,
+  digestsEqual,
+  GENESIS_TAG,
+  liftXOnly,
+} from '@zkcoins/sdk';
 import {
   encodeHexLower,
   readU128Be,
@@ -15,6 +25,7 @@ import {
   writeU32Be,
   writeU64Be,
 } from '@/lib/crypto/bytes';
+import { sha256 } from '@/lib/crypto/sha256';
 
 export const COIN_WIRE_LEN = 112;
 export const MAX_ASSET_NAME_LEN = 255;
@@ -195,7 +206,89 @@ function writeIssuanceTerms(terms: IssuanceTerms): Uint8Array {
   return out;
 }
 
-/** Deserialize canonical CoinProof bytes. Rejects trailing bytes and width errors. */
+/** Reject bytes that are not a canonical Poseidon Digest encoding. */
+function requireCanonicalDigest(bytes: Uint8Array, field: string): void {
+  try {
+    digestFromBytes(bytes);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new CoinProofError(`${field}: non-canonical digest: ${detail}`);
+  }
+}
+
+/** Reject x-only pubkeys / nonces that do not lift to a secp256k1 point. */
+function requireXOnlyPoint(bytes: Uint8Array, field: string): void {
+  try {
+    liftXOnly(bytes, field);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new CoinProofError(`${field}: invalid x-only curve point: ${detail}`);
+  }
+}
+
+/**
+ * Recompute asset_id from asset_terms and require equality with coin.assetId.
+ * Spec §1.4 / §1.5 — name is never trusted without this binding.
+ */
+export function assertAssetIdMatchesTerms(coin: Coin, terms: IssuanceTerms): void {
+  const nameHash = sha256(terms.name);
+  let expected: ReturnType<typeof assetIdV1>;
+  if (terms.issuanceVersion === 1) {
+    expected = assetIdV1(
+      GENESIS_TAG,
+      terms.creatorPubkey,
+      nameHash,
+      terms.decimals,
+      terms.issuanceVersion,
+    );
+  } else if (terms.issuanceVersion === 2) {
+    if (terms.capTotal === undefined || terms.termsSalt === undefined) {
+      throw new CoinProofError('asset_terms v2 missing cap_total or terms_salt');
+    }
+    expected = assetIdV2(
+      GENESIS_TAG,
+      terms.creatorPubkey,
+      nameHash,
+      terms.decimals,
+      terms.issuanceVersion,
+      terms.capTotal,
+      terms.termsSalt,
+    );
+  } else {
+    throw new CoinProofError(`asset_terms.issuance_version invalid: ${terms.issuanceVersion}`);
+  }
+  const expectedBytes = digestToBytes(expected);
+  const actual = digestFromBytes(coin.assetId);
+  if (!digestsEqual(actual, expected)) {
+    throw new CoinProofError(
+      `coin.asset_id ${encodeHexLower(coin.assetId)} ≠ recompute(asset_terms) ${encodeHexLower(expectedBytes)}`,
+    );
+  }
+}
+
+/** Structural + semantic validation after width-correct decode. */
+export function validateCoinProofSemantics(cp: CoinProof): void {
+  // Poseidon digests: limbs must be < Goldilocks p (canonical encoding).
+  requireCanonicalDigest(cp.coin.identifier, 'coin.identifier');
+  requireCanonicalDigest(cp.coin.assetId, 'coin.asset_id');
+  requireCanonicalDigest(cp.creatingPrevAsh, 'creating_prev_ash');
+  requireCanonicalDigest(cp.navOpening.mth, 'nav_opening.mth');
+  requireCanonicalDigest(cp.detectTag, 'detect_tag');
+  // coin.recipient is an address (H(Pk₀ ‖ nk_commit)), not a curve point.
+  // R' / nav_rand are opaque 32-byte secrets — width already enforced by take().
+
+  // X-only curve points on the nullifier / delivery path.
+  requireXOnlyPoint(cp.creatingNullifier.pkCreate, 'creating_nullifier.Pk');
+  requireXOnlyPoint(cp.creatingNullifier.rCreate, 'creating_nullifier.R');
+  requireXOnlyPoint(cp.epk, 'epk');
+
+  if (cp.assetTerms !== undefined) {
+    requireXOnlyPoint(cp.assetTerms.creatorPubkey, 'asset_terms.creator_pubkey');
+    assertAssetIdMatchesTerms(cp.coin, cp.assetTerms);
+  }
+}
+
+/** Deserialize canonical CoinProof bytes. Rejects trailing bytes, width, and semantic errors. */
 export function deserializeCoinProof(bytes: Uint8Array): CoinProof {
   const cur = new Cursor(bytes);
   const coin = deserializeCoin(cur.take(COIN_WIRE_LEN, 'CoinProof.coin'));
@@ -241,6 +334,7 @@ export function deserializeCoinProof(bytes: Uint8Array): CoinProof {
   if (assetTerms !== undefined) {
     result.assetTerms = assetTerms;
   }
+  validateCoinProofSemantics(result);
   return result;
 }
 

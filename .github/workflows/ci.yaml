@@ -58,8 +58,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Checkout
+      # package.json depends on @zkcoins/sdk via file:../sdk (same layout
+      # as the sibling app monorepo checkout). Hosted runners only get
+      # this repository by default, so checkout both under a parent so
+      # explorer → ../sdk resolves exactly as it does locally.
+      - name: Checkout explorer
         uses: actions/checkout@v4
+        with:
+          path: explorer
+
+      - name: Checkout SDK (file:../sdk)
+        uses: actions/checkout@v4
+        with:
+          repository: zk-coins/sdk
+          path: sdk
 
       # No `.nvmrc` and no `engines.node` pin in package.json. Node 22 is
       # what local verification uses (and what the sibling app workflow
@@ -69,23 +81,37 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
+          cache-dependency-path: |
+            explorer/package-lock.json
+            sdk/package-lock.json
+
+      - name: Build SDK
+        working-directory: sdk
+        run: |
+          npm ci
+          npm run build
 
       - name: Install dependencies
+        working-directory: explorer
         run: npm ci
 
       - name: Lint
+        working-directory: explorer
         run: npm run lint
 
       - name: Typecheck
+        working-directory: explorer
         run: npm run typecheck
 
       - name: Test
+        working-directory: explorer
         run: npm test
 
       # Dummy origin only — never a real node. next.config.js requires a
       # non-empty http(s) URL at build time; this value is not used as a
       # network target in CI (static export, no server runtime).
       - name: Build
+        working-directory: explorer
         run: npm run build
         env:
           NEXT_PUBLIC_NODE_BASE_URL: https://ci-node.example.invalid
@@ -96,6 +122,7 @@ jobs:
       # an env value leaks in. Never `|| true` — that would mask a broken
       # contract as success.
       - name: Build without NEXT_PUBLIC_NODE_BASE_URL must fail
+        working-directory: explorer
         run: |
           if npm run build; then
             echo "::error::build succeeded without NEXT_PUBLIC_NODE_BASE_URL; fail-closed contract is broken"

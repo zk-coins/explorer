@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev --port 3091",
     "build": "next build",
-    "start": "next start --port 3091",
+    "start": "npx --yes serve@14.2.4 out -l 3091",
     "lint": "next lint && prettier --check .",
     "lint:fix": "next lint --fix && prettier --write .",
     "typecheck": "tsc --noEmit",

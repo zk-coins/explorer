@@ -13,10 +13,13 @@
  *   - C_balance Plonky2 proof verification
  *   - nav_ceiling canonicity against own scan (size_ceiling ≤ size_final, MTH rebuild)
  *   - first-occurrence + completed classification against own scan
+ *
+ * Fail-closed: /v1/info errors abort the resolve (network binding + max_blob_bytes).
  */
 
 import { digestToBytes, networkIdMainnet, networkIdRegtest, networkIdTestnet } from '@zkcoins/sdk';
 import { fetchBlossomBlobFromHolders } from '@/lib/api/blossom';
+import { assertDecodedSize } from '@/lib/api/bodyLimit';
 import { fetchInfo, fetchNullifier } from '@/lib/api/client';
 import type { NetworkTag } from '@/lib/api/types';
 import {
@@ -41,8 +44,13 @@ export interface BalanceDeps {
   fetchNullifier?: typeof fetchNullifier;
   baseUrl?: string;
   signal?: AbortSignal;
-  /** Override network when /v1/info is not available (tests). */
+  /**
+   * Override network when tests inject a known network. Production always
+   * loads network from /v1/info; a failed info fetch aborts (fail-closed).
+   */
   network?: NetworkTag;
+  /** Override max_blob_bytes (tests). Production always loads from /v1/info. */
+  maxBlobBytes?: number;
 }
 
 function parseBlobLocatorSet(hint: string | undefined): string[] {
@@ -159,11 +167,12 @@ export function verifyBalanceAttestationBytes(
       );
     }
   } else {
+    // Pure helper without network: leave open. Live resolve always supplies network.
     checks.push(
       open(
         'network_id',
         'network_id equals verifier network',
-        'Network not supplied; call with /v1/info network to close this check',
+        'Network not supplied to pure helper; live resolve requires /v1/info',
       ),
     );
   }
@@ -207,13 +216,24 @@ export async function resolveBalanceAttestation(
   const signal = deps.signal;
   const baseUrl = deps.baseUrl;
 
+  // Fail-closed network + max_blob_bytes: never silently downgrade on /v1/info error.
   let network = deps.network;
-  if (network === undefined) {
+  let maxBlobBytes = deps.maxBlobBytes;
+  if (network === undefined || maxBlobBytes === undefined) {
     try {
       const info = await fetchInf({ baseUrl, signal });
-      network = info.network;
-    } catch {
-      // leave undefined → open network_id check
+      if (network === undefined) {
+        network = info.network;
+      }
+      if (maxBlobBytes === undefined) {
+        maxBlobBytes = info.max_blob_bytes;
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return {
+        checks: [fail('node_info', 'GET /v1/info (network + max_blob_bytes)', detail)],
+        fatalError: `GET /v1/info failed: ${detail}`,
+      };
     }
   }
 
@@ -229,6 +249,7 @@ export async function resolveBalanceAttestation(
     }
     try {
       body = base64UrlDecodeNoPad(fragment.attestationInline);
+      assertDecodedSize(body.length, maxBlobBytes, 'inline BalanceAttestationV1');
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       return {
@@ -258,7 +279,10 @@ export async function resolveBalanceAttestation(
       };
     }
     try {
-      const got = await fetchFromHolders(expectedHandle, holders, { signal });
+      const got = await fetchFromHolders(expectedHandle, holders, {
+        signal,
+        maxBlobBytes,
+      });
       body = got.body;
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -270,7 +294,7 @@ export async function resolveBalanceAttestation(
   }
 
   const view = verifyBalanceAttestationBytes(body, fragment, {
-    ...(network !== undefined ? { network } : {}),
+    network,
     ...(expectedHandle !== undefined ? { expectedHandle } : {}),
   });
 

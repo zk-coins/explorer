@@ -317,8 +317,23 @@ function AddrBody({ result }: { result: AddrFragmentResult | null }) {
 
       <section data-testid="history-list" className="space-y-2">
         <h3 className="text-sm font-medium">History</h3>
-        {view.history.length === 0 && (
-          <p className="text-sm text-ink3">No discovered entries yet.</p>
+        {view.historyNotResolvable === true && (
+          <div
+            data-testid="history-not-resolvable"
+            className="rounded border border-warn/40 bg-warn/10 p-3 text-sm"
+          >
+            <p className="text-xs uppercase tracking-wide text-warn">
+              history · not yet resolvable in this build
+            </p>
+            <p className="mt-1 text-ink2">
+              Nostr mesh discovery is not wired here. An empty list below is not a verified &quot;no
+              payments&quot; result — only decoded/unverified material from injected discoveries
+              would appear.
+            </p>
+          </div>
+        )}
+        {view.history.length === 0 && view.historyNotResolvable !== true && (
+          <p className="text-sm text-ink3">No discovered entries in the supplied discovery set.</p>
         )}
         {view.history.map((entry, i) => {
           if (entry.side === 'incoming') {
@@ -328,7 +343,7 @@ function AddrBody({ result }: { result: AddrFragmentResult | null }) {
                 data-testid="history-incoming"
                 className="rounded border border-line bg-surface p-3 text-sm"
               >
-                <p className="text-xs uppercase tracking-wide text-ink3">incoming</p>
+                <p className="text-xs uppercase tracking-wide text-ink3">incoming · decoded</p>
                 <Field label="amount" value={entry.coin.amount} />
                 <Field label="asset_id" value={entry.coin.assetIdHex} mono />
                 <Field label="Pk_create" value={entry.creatingPkHex} mono />
@@ -349,6 +364,19 @@ function AddrBody({ result }: { result: AddrFragmentResult | null }) {
               </div>
             );
           }
+          if (entry.status === 'unresolved') {
+            return (
+              <div
+                key={`out-ur-${i}`}
+                data-testid="history-outgoing-unresolved"
+                className="rounded border border-warn/40 bg-warn/10 p-3 text-sm"
+              >
+                <p className="text-xs uppercase tracking-wide text-warn">outgoing · unresolved</p>
+                <p className="mt-1 text-ink2">{entry.reason}</p>
+                <Field label="coin_id" value={entry.coinIdHex} mono />
+              </div>
+            );
+          }
           return (
             <div
               key={`out-${i}`}
@@ -357,7 +385,7 @@ function AddrBody({ result }: { result: AddrFragmentResult | null }) {
             >
               <p className="text-xs uppercase tracking-wide text-ink3">outgoing · recovered</p>
               <Field label="coin_id" value={entry.coinIdHex} mono />
-              {entry.coin !== undefined && <Field label="amount" value={entry.coin.amount} />}
+              <Field label="amount" value={entry.coin.amount} />
             </div>
           );
         })}

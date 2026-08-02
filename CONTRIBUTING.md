@@ -37,8 +37,11 @@ belongs in the node.
 - Required env at build: `NEXT_PUBLIC_NODE_BASE_URL` (no default).
 
 ```bash
+# Sibling SDK (file:../sdk) must be built first — same layout as the app monorepo.
+(cd ../sdk && npm ci && npm run build)
 export NEXT_PUBLIC_NODE_BASE_URL=https://node.example.com
 npm ci && npm run lint && npm run typecheck && npm test && npm run build
+# Static export: `npm start` serves out/ (not next start).
 ```
 
 ## Related Repos

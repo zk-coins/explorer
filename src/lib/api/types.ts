@@ -13,12 +13,17 @@ export type ConfirmationState = 'pending' | 'completed';
 
 export type NetworkTag = 'mainnet' | 'testnet' | 'regtest';
 
-/** `GET /v1/info` — fields Public mode uses. */
+/** `GET /v1/info` — fields Public mode and blob-size gates use. */
 export interface InfoResponse {
   network: NetworkTag;
   protocol_version: string;
   finality_confirmations: number;
   activation_height: number;
+  /**
+   * §7.4 / §7.5 advertised Blossom body size ceiling (bytes). Required for
+   * fail-closed blob loads — never invent a default when the field is absent.
+   */
+  max_blob_bytes: number;
   features: string[];
 }
 

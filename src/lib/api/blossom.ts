@@ -4,9 +4,13 @@
  * `GET /blossom/<sha256>` returns raw ciphertext bytes. The client MUST verify
  * `H(body) == sha256` (content-addressed self-check) and reject a mismatch.
  * Ciphertext is already encrypted; the path is unauthenticated.
+ *
+ * Body size is gated by `max_blob_bytes` from `/v1/info` (Content-Length,
+ * streamed bytes). Callers MUST supply the advertised ceiling — no default.
  */
 
 import { NodeApiError } from '@/lib/api/types';
+import { readArrayBufferLimited } from '@/lib/api/bodyLimit';
 import { encodeHexLower } from '@/lib/crypto/bytes';
 import { sha256 } from '@/lib/crypto/sha256';
 import { verifyBlobId } from '@/lib/crypto/zbe';
@@ -17,6 +21,11 @@ export interface BlossomFetchOpts {
   baseUrl?: string;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
+  /**
+   * §7.4 advertised size ceiling from `/v1/info.max_blob_bytes`.
+   * Required — never invent a default limit.
+   */
+  maxBlobBytes: number;
 }
 
 function resolveBase(baseUrl: string | undefined): string {
@@ -35,11 +44,21 @@ function resolveBase(baseUrl: string | undefined): string {
  */
 export async function fetchBlossomBlob(
   blobId: Uint8Array,
-  opts: BlossomFetchOpts = {},
+  opts: BlossomFetchOpts,
 ): Promise<Uint8Array> {
   if (!(blobId instanceof Uint8Array) || blobId.length !== 32) {
     throw new Error(
       `fetchBlossomBlob: blobId must be 32 bytes, got ${blobId instanceof Uint8Array ? blobId.length : typeof blobId}`,
+    );
+  }
+  if (
+    typeof opts.maxBlobBytes !== 'number' ||
+    !Number.isInteger(opts.maxBlobBytes) ||
+    opts.maxBlobBytes <= 0 ||
+    !Number.isSafeInteger(opts.maxBlobBytes)
+  ) {
+    throw new Error(
+      `fetchBlossomBlob: maxBlobBytes must be a positive safe integer, got ${JSON.stringify(opts.maxBlobBytes)}`,
     );
   }
   const hex = encodeHexLower(blobId);
@@ -67,7 +86,7 @@ export async function fetchBlossomBlob(
     );
   }
 
-  const buf = new Uint8Array(await res.arrayBuffer());
+  const buf = await readArrayBufferLimited(res, opts.maxBlobBytes, `blossom/${hex}`);
   if (!verifyBlobId(buf, blobId)) {
     const actual = encodeHexLower(sha256(buf));
     throw new NodeApiError(
@@ -86,7 +105,7 @@ export async function fetchBlossomBlob(
 export async function fetchBlossomBlobFromHolders(
   blobId: Uint8Array,
   holders: string[],
-  opts: Omit<BlossomFetchOpts, 'baseUrl'> = {},
+  opts: Omit<BlossomFetchOpts, 'baseUrl'>,
 ): Promise<{ body: Uint8Array; holder: string }> {
   if (holders.length === 0) {
     throw new Error('fetchBlossomBlobFromHolders: holders list is empty');

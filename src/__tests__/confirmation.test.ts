@@ -3,47 +3,22 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { InscriptionEntry } from '@/lib/api/types';
-import { deserializeCoinProof, serializeCoinProof, type CoinProof } from '@/lib/bundle/coinProof';
-import { openConfirmationBlob } from '@/lib/bearer/confirmation';
+import type { InscriptionEntry, InscriptionsResponse } from '@/lib/api/types';
+import { deserializeCoinProof, serializeCoinProof } from '@/lib/bundle/coinProof';
+import {
+  findCreatingPkInInscriptions,
+  openConfirmationBlob,
+  resolveConfirmationLink,
+} from '@/lib/bearer/confirmation';
 import { stateFromInscriptions } from '@/lib/bearer/stateFromNode';
 import { encodeHexLower } from '@/lib/crypto/bytes';
 import { zbeSeal } from '@/lib/crypto/zbe';
-
-function fill(n: number, v: number): Uint8Array {
-  return Uint8Array.from({ length: n }, () => v);
-}
-
-function sampleCoinProof(seed: number): CoinProof {
-  return {
-    coin: {
-      identifier: fill(32, seed),
-      recipient: fill(32, seed + 1),
-      amount: 1_000_000n + BigInt(seed),
-      assetId: fill(32, seed + 2),
-    },
-    proof: fill(64, seed + 3),
-    inclusionProof: fill(32, seed + 4),
-    creatingPrevAsh: fill(32, seed + 5),
-    creatingNullifier: {
-      pkCreate: fill(32, seed + 6),
-      rCreate: fill(32, seed + 7),
-      rPrimeCreate: fill(32, seed + 8),
-    },
-    navOpening: {
-      size: 42n,
-      mth: fill(32, seed + 9),
-      navRand: fill(32, seed + 10),
-    },
-    epk: fill(32, seed + 11),
-    ciphertext: fill(48, seed + 12),
-    detectTag: fill(32, seed + 13),
-  };
-}
+import type { TxFragmentOk } from '@/lib/fragments';
+import { fill, sampleCoinProof, xOnlyFromSeed } from './fixtures/crypto';
 
 describe('§5.6 confirmation open', () => {
   it('opens a sealed CoinProof and exposes coin fields', () => {
-    const kTx = fill(32, 0xab);
+    const kTx = fill(32, 0x2b);
     const cp = sampleCoinProof(1);
     const plain = serializeCoinProof(cp);
     const { ciphertext, blobId } = zbeSeal(kTx, plain);
@@ -67,7 +42,7 @@ describe('§5.6 confirmation open', () => {
   });
 
   it('rejects manipulated ciphertext via blob_id check', () => {
-    const kTx = fill(32, 0xcd);
+    const kTx = fill(32, 0x2c);
     const plain = serializeCoinProof(sampleCoinProof(2));
     const { ciphertext, blobId } = zbeSeal(kTx, plain);
     const tampered = ciphertext.slice();
@@ -77,6 +52,18 @@ describe('§5.6 confirmation open', () => {
     expect(opened.fatalError).toMatch(/blob_id mismatch/);
     expect(opened.checks.find((c) => c.id === 'blob_id')?.status).toBe('fail');
     expect(opened.coinProof).toBeUndefined();
+  });
+
+  it('rejects non-canonical / invalid curve material in CoinProof', () => {
+    const kTx = fill(32, 0x2d);
+    const cp = sampleCoinProof(3);
+    // Force an invalid x-only epk (all zeros is not a valid curve point).
+    cp.epk = new Uint8Array(32);
+    const plain = serializeCoinProof(cp);
+    const { ciphertext, blobId } = zbeSeal(kTx, plain);
+    const opened = openConfirmationBlob(kTx, ciphertext, blobId);
+    expect(opened.coinProof).toBeUndefined();
+    expect(opened.checks.find((c) => c.id === 'coinproof_decode')?.status).toBe('fail');
   });
 });
 
@@ -102,22 +89,107 @@ describe('§5.6 state fixtures (from node data)', () => {
     ];
   }
 
-  it('surfaces pending from inscription data', () => {
-    const hit = stateFromInscriptions(pk, fixture('pending'));
-    expect(hit?.state).toBe('pending');
+  it('surfaces pending / completed / failed from node data only', () => {
+    for (const state of ['pending', 'completed', 'failed'] as const) {
+      const hit = stateFromInscriptions(pk, fixture(state));
+      expect(hit?.state).toBe(state);
+    }
+  });
+});
+
+describe('§5.6 Path-B honesty + inscription pagination', () => {
+  it('marks present:false as open (not pass)', async () => {
+    const kTx = fill(32, 0x31);
+    const cp = sampleCoinProof(4);
+    const plain = serializeCoinProof(cp);
+    const { ciphertext, blobId } = zbeSeal(kTx, plain);
+    const frag: TxFragmentOk = {
+      status: 'ok',
+      kind: 'tx',
+      bundle: blobId,
+      view: kTx,
+    };
+
+    const view = await resolveConfirmationLink(frag, {
+      fetchInfo: async () => ({
+        network: 'regtest',
+        protocol_version: 'v1',
+        finality_confirmations: 6,
+        activation_height: 0,
+        max_blob_bytes: 1_048_576,
+        features: [],
+      }),
+      fetchBlob: async () => ciphertext,
+      fetchNullifier: async () => ({
+        present: false,
+        audit_path: [],
+        tree_size: 0,
+        root: 'aa'.repeat(32),
+        tip_block_hash: 'bb'.repeat(32),
+        tip_height: 10,
+      }),
+      fetchInscriptions: async () => ({ inscriptions: [] }),
+    });
+
+    const pathB = view.checks.find((c) => c.id === 'nullifier_path_b');
+    expect(pathB?.status).toBe('open');
+    expect(pathB?.status).not.toBe('pass');
+    // Open verification steps remain open:
+    for (const id of ['plonky2_proof', 'inclusion_proof', 'nav_canonical', 's2c_binding']) {
+      expect(view.checks.find((c) => c.id === id)?.status).toBe('open');
+    }
   });
 
-  it('surfaces completed from inscription data', () => {
-    const hit = stateFromInscriptions(pk, fixture('completed'));
+  it('walks inscription cursor pages until creating Pk is found', async () => {
+    const pkBytes = xOnlyFromSeed(99);
+    const pkHex = encodeHexLower(pkBytes);
+    const page1: InscriptionsResponse = {
+      inscriptions: [
+        {
+          txid: '11'.repeat(32),
+          height: 1,
+          tx_index: 0,
+          vin_index: 0,
+          count: 1,
+          format: 1,
+          confirmation_state: 'completed',
+          nullifiers: [{ pubkey: '22'.repeat(32), r: '33'.repeat(32), state: 'completed' }],
+        },
+      ],
+      next_height: 2,
+      next_tx_index: 0,
+      next_vin_index: 0,
+    };
+    const page2: InscriptionsResponse = {
+      inscriptions: [
+        {
+          txid: '44'.repeat(32),
+          height: 2,
+          tx_index: 0,
+          vin_index: 0,
+          count: 1,
+          format: 1,
+          confirmation_state: 'completed',
+          nullifiers: [{ pubkey: pkHex, r: '55'.repeat(32), state: 'completed' }],
+        },
+      ],
+    };
+
+    let calls = 0;
+    const { hit, pagesScanned } = await findCreatingPkInInscriptions(
+      pkHex,
+      async (opts: { from_height?: number } = {}) => {
+        calls += 1;
+        if (opts.from_height === undefined) {
+          return page1;
+        }
+        return page2;
+      },
+    );
+
+    expect(pagesScanned).toBe(2);
+    expect(calls).toBe(2);
     expect(hit?.state).toBe('completed');
-  });
-
-  it('surfaces failed from inscription data', () => {
-    const hit = stateFromInscriptions(pk, fixture('failed'));
-    expect(hit?.state).toBe('failed');
-  });
-
-  it('returns undefined when Pk is absent — never invents a state', () => {
-    expect(stateFromInscriptions('dd'.repeat(32), fixture('completed'))).toBeUndefined();
+    expect(hit?.txid).toBe('44'.repeat(32));
   });
 });

@@ -1,5 +1,5 @@
 /**
- * §5.7 balance attestation decode + checklist honesty.
+ * §5.7 balance attestation decode + checklist honesty + fail-closed info.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -7,7 +7,7 @@ import {
   serializeBalanceAttestationV1,
   type BalanceAttestationV1,
 } from '@/lib/bundle/balanceAttestation';
-import { verifyBalanceAttestationBytes } from '@/lib/bearer/balance';
+import { resolveBalanceAttestation, verifyBalanceAttestationBytes } from '@/lib/bearer/balance';
 import { base64UrlEncodeNoPad, encodeHexLower } from '@/lib/crypto/bytes';
 import { sha256 } from '@/lib/crypto/sha256';
 import type { BalanceFragmentOk } from '@/lib/fragments';
@@ -106,5 +106,30 @@ describe('§5.7 balance attestation', () => {
       expectedHandle: handle,
     });
     expect(view.checks.find((c) => c.id === 'handle_hash')?.status).toBe('pass');
+  });
+
+  it('propagates /v1/info failure fail-closed (does not open network_id quietly)', async () => {
+    const att = sampleAttestation();
+    const frag = fragmentFor(att);
+    const view = await resolveBalanceAttestation(frag, {
+      fetchInfo: async () => {
+        throw new Error('info endpoint down');
+      },
+    });
+    expect(view.fatalError).toMatch(/info endpoint down/);
+    expect(view.checks.find((c) => c.id === 'node_info')?.status).toBe('fail');
+    // Must not have silently left network_id as open without aborting:
+    expect(view.fields).toBeUndefined();
+  });
+
+  it('rejects inline body larger than max_blob_bytes', async () => {
+    const att = sampleAttestation();
+    const frag = fragmentFor(att);
+    const view = await resolveBalanceAttestation(frag, {
+      network: 'regtest',
+      maxBlobBytes: 16,
+    });
+    expect(view.fatalError).toMatch(/max_blob_bytes/);
+    expect(view.checks.find((c) => c.id === 'obtain')?.status).toBe('fail');
   });
 });

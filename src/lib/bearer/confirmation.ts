@@ -4,10 +4,11 @@
  * 1. Fetch CoinProof ZBE blob by blob_id (zkbid)
  * 2. Content-address check: H(ciphertext) == blob_id
  * 3. ZBE-open under K_tx (zkview)
- * 4. Deserialize CoinProof; render coin fields
+ * 4. Deserialize CoinProof (width + semantic checks); render coin fields
  * 5. Anchoring trail: creating_nullifier → Path-B / inscriptions → §3.10 state
  *
  * Status shown is the §3.10 state from node data — never a client classification.
+ * Path-B `present: false` is unauthenticated absence → check stays `open`, never `pass`.
  */
 
 import { fetchBlossomBlob, fetchBlossomBlobFromHolders } from '@/lib/api/blossom';
@@ -56,6 +57,8 @@ export interface ConfirmationDeps {
   fetchInfo?: typeof fetchInfo;
   baseUrl?: string;
   signal?: AbortSignal;
+  /** Max inscription pages to scan for creating Pk (default 50). */
+  maxInscriptionPages?: number;
 }
 
 function parseHolderHint(hint: string | undefined): string[] {
@@ -129,16 +132,67 @@ export function openConfirmationBlob(
     checks.push(
       pass(
         'coinproof_decode',
-        'CoinProof decode',
+        'CoinProof decode (width + digests/points/asset_id)',
         `coin identifier ${encodeHexLower(coinProof.coin.identifier).slice(0, 16)}…`,
       ),
     );
     return { checks, coinProof };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    checks.push(fail('coinproof_decode', 'CoinProof decode', detail));
+    checks.push(
+      fail('coinproof_decode', 'CoinProof decode (width + digests/points/asset_id)', detail),
+    );
     return { checks, fatalError: detail };
   }
+}
+
+/**
+ * Walk inscription cursor pages until creating Pk is found or pages are exhausted.
+ */
+export async function findCreatingPkInInscriptions(
+  pkHex: string,
+  fetchInsc: typeof fetchInscriptions,
+  opts: {
+    baseUrl?: string;
+    signal?: AbortSignal;
+    pageLimit?: number;
+    maxPages?: number;
+  } = {},
+): Promise<{ hit?: ReturnType<typeof stateFromInscriptions>; pagesScanned: number }> {
+  const pageLimit = opts.pageLimit ?? 200;
+  const maxPages = opts.maxPages ?? 50;
+  let from_height: number | undefined;
+  let from_tx_index: number | undefined;
+  let from_vin_index: number | undefined;
+  let pagesScanned = 0;
+
+  for (let page = 0; page < maxPages; page++) {
+    const insc = await fetchInsc({
+      limit: pageLimit,
+      ...(from_height !== undefined ? { from_height } : {}),
+      ...(from_tx_index !== undefined ? { from_tx_index } : {}),
+      ...(from_vin_index !== undefined ? { from_vin_index } : {}),
+      baseUrl: opts.baseUrl,
+      signal: opts.signal,
+    });
+    pagesScanned += 1;
+    const hit = stateFromInscriptions(pkHex, insc.inscriptions);
+    if (hit !== undefined) {
+      return { hit, pagesScanned };
+    }
+    if (
+      insc.next_height === undefined ||
+      insc.next_tx_index === undefined ||
+      insc.next_vin_index === undefined
+    ) {
+      break;
+    }
+    from_height = insc.next_height;
+    from_tx_index = insc.next_tx_index;
+    from_vin_index = insc.next_vin_index;
+  }
+
+  return { pagesScanned };
 }
 
 export async function resolveConfirmationLink(
@@ -152,20 +206,36 @@ export async function resolveConfirmationLink(
   const fetchInf = deps.fetchInfo ?? fetchInfo;
   const signal = deps.signal;
   const baseUrl = deps.baseUrl;
+  const maxInscriptionPages = deps.maxInscriptionPages ?? 50;
 
   const checks: CheckItem[] = [];
   const holders = parseHolderHint(fragment.holderHint);
 
+  // max_blob_bytes is required before any untrusted body load.
+  let maxBlobBytes: number;
+  try {
+    const info = await fetchInf({ baseUrl, signal });
+    maxBlobBytes = info.max_blob_bytes;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    checks.push(fail('node_info', 'GET /v1/info (max_blob_bytes)', detail));
+    return { checks, fatalError: `GET /v1/info failed: ${detail}` };
+  }
+  checks.push(pass('node_info', 'GET /v1/info (max_blob_bytes)', `max_blob_bytes=${maxBlobBytes}`));
+
   let ciphertext: Uint8Array;
   try {
     if (holders.length > 0) {
-      const got = await fetchFromHolders(fragment.bundle, holders, { signal });
+      const got = await fetchFromHolders(fragment.bundle, holders, {
+        signal,
+        maxBlobBytes,
+      });
       ciphertext = got.body;
       checks.push(
         pass('fetch_blob', 'Fetch ZBE blob (Blossom)', `Fetched from holder ${got.holder}`),
       );
     } else {
-      ciphertext = await fetchBlob(fragment.bundle, { baseUrl, signal });
+      ciphertext = await fetchBlob(fragment.bundle, { baseUrl, signal, maxBlobBytes });
       checks.push(pass('fetch_blob', 'Fetch ZBE blob (Blossom)', 'Fetched from node Blossom base'));
     }
   } catch (err) {
@@ -264,11 +334,12 @@ export async function resolveConfirmationLink(
         );
       }
     } else {
+      // present: false is unauthenticated local-index absence — not verified inclusion.
       checks.push(
-        pass(
+        open(
           'nullifier_path_b',
           'Path-B nullifier lookup (creating Pk)',
-          'present: false — unauthenticated local-index absence (not non-inclusion)',
+          'present: false — unauthenticated local-index absence (not non-inclusion); inclusion not verified',
         ),
       );
     }
@@ -278,10 +349,11 @@ export async function resolveConfirmationLink(
   }
 
   try {
-    // tip for confirmations comes from Path-B (tip_height), not from /v1/info.
-    await fetchInf({ baseUrl, signal });
-    const insc = await fetchInsc({ limit: 200, baseUrl, signal });
-    const hit = stateFromInscriptions(creatingNullifier.pkCreateHex, insc.inscriptions);
+    const { hit, pagesScanned } = await findCreatingPkInInscriptions(
+      creatingNullifier.pkCreateHex,
+      fetchInsc,
+      { baseUrl, signal, maxPages: maxInscriptionPages },
+    );
     if (hit !== undefined) {
       state = hit.state;
       anchoring.revealTxid = hit.txid;
@@ -293,7 +365,7 @@ export async function resolveConfirmationLink(
         pass(
           'state_310',
           '§3.10 state (from node inscription data)',
-          `state=${hit.state} reveal_txid=${hit.txid} height=${hit.height}`,
+          `state=${hit.state} reveal_txid=${hit.txid} height=${hit.height} (pages=${pagesScanned})`,
         ),
       );
     } else {
@@ -301,7 +373,7 @@ export async function resolveConfirmationLink(
         open(
           'state_310',
           '§3.10 state (from node inscription data)',
-          'Creating Pk not found in the fetched inscription page — state not asserted; scan deeper or self-host a full scan',
+          `Creating Pk not found after scanning ${pagesScanned} inscription page(s) — state not asserted`,
         ),
       );
     }
@@ -316,11 +388,13 @@ export async function resolveConfirmationLink(
     );
   }
 
+  // Asset name only after semantic decode (asset_id recompute already ran when terms present).
   let assetTermsName: string | undefined;
   if (cp.assetTerms !== undefined) {
     try {
       assetTermsName = new TextDecoder('utf-8', { fatal: true }).decode(cp.assetTerms.name);
     } catch {
+      // Non-UTF-8 name: carry asset opaquely without a display name (spec §1.5).
       assetTermsName = undefined;
     }
   }

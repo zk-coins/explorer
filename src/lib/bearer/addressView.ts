@@ -5,11 +5,11 @@
  *   - 64 B: ivk ‖ ovk  → full history (incoming + outgoing recovery)
  *   - 32 B: ivk only   → incoming only; outgoing side marked not-derivable
  *
- * Discovery of gift-wrapped delivery events is a mesh/Nostr scan. This block
- * implements key-mode selection, K_tx re-derivation, ZBE open of provided
- * blobs, and honest open steps for mesh scan when no events are supplied.
- * Outgoing recovery (ovk path) is wired as pure helpers for when SDR/output_ref
- * material is available.
+ * Discovery of gift-wrapped delivery events is a mesh/Nostr scan. This build
+ * does not auto-scan relays: without injected discoveries the route reports
+ * history as not yet resolvable (never an empty list that looks like
+ * "no history"). Outgoing entries without K_tx are `unresolved`, not
+ * `recovered`.
  */
 
 import { detectTag, digestToBytes } from '@zkcoins/sdk';
@@ -39,20 +39,37 @@ export interface OutgoingNotDerivable {
 
 export interface DecryptedOutgoing {
   side: 'outgoing';
+  /** Only after a successful open of the coin ciphertext under K_tx. */
   status: 'recovered';
-  coin?: ReturnType<typeof coinToView>;
+  coin: ReturnType<typeof coinToView>;
   coinIdHex: string;
   blobIdHex: string;
   epkHex: string;
 }
 
-export type HistoryEntry = DecryptedIncoming | OutgoingNotDerivable | DecryptedOutgoing;
+/** Outgoing material seen but not opened (NIP-44 / K_tx recovery still open). */
+export interface OutgoingUnresolved {
+  side: 'outgoing';
+  status: 'unresolved';
+  reason: string;
+  coinIdHex: string;
+  blobIdHex: string;
+  epkHex: string;
+}
+
+export type HistoryEntry =
+  DecryptedIncoming | OutgoingNotDerivable | DecryptedOutgoing | OutgoingUnresolved;
 
 export interface AddressViewResult {
   mode: AddressViewMode;
   addressHex: string;
   checks: CheckItem[];
   history: HistoryEntry[];
+  /**
+   * True when this build cannot resolve live history (no mesh scan / no
+   * injected discoveries). UI must not present empty history as "no payments".
+   */
+  historyNotResolvable?: boolean;
   fatalError?: string;
 }
 
@@ -129,7 +146,8 @@ export interface DiscoveredOutgoing {
 
 /**
  * Build the address-view model from keys + optional discovered bundles.
- * When no discoveries are provided, history is empty and mesh scan is open.
+ * When no discoveries are provided, history is empty and mesh scan is open;
+ * `historyNotResolvable` is set so the UI does not look like "no history".
  */
 export function buildAddressView(
   fragment: AddrFragmentOk,
@@ -156,13 +174,14 @@ export function buildAddressView(
   const history: HistoryEntry[] = [];
   const incoming = discoveries.incoming ?? [];
   const outgoing = discoveries.outgoing ?? [];
+  const noDiscoveries = incoming.length === 0 && outgoing.length === 0;
 
-  if (incoming.length === 0 && outgoing.length === 0) {
+  if (noDiscoveries) {
     checks.push(
       open(
         'mesh_scan',
         'Nostr mesh scan (detect_tag match)',
-        'No delivery events supplied. Live discovery requires scanning paired relays for kind-1059 gift-wraps and matching detect_tag from ivk+epk — not auto-scanned without relay events',
+        'Not yet resolvable in this build: live discovery requires scanning paired relays for kind-1059 gift-wraps and matching detect_tag from ivk+epk — no relay client is wired here',
       ),
     );
   } else {
@@ -225,12 +244,20 @@ export function buildAddressView(
       ),
     );
   } else if (ovk !== undefined) {
-    if (outgoing.length === 0) {
+    if (outgoing.length === 0 && !noDiscoveries) {
       checks.push(
         open(
           'outgoing_recovery',
           'Outgoing recovery via ovk',
           'No SelfDeliveryRecord / output_ref material supplied; full mesh recovery of SDRs is an open step',
+        ),
+      );
+    } else if (outgoing.length === 0 && noDiscoveries) {
+      checks.push(
+        open(
+          'outgoing_recovery',
+          'Outgoing recovery via ovk',
+          'Not yet resolvable in this build without mesh discovery / SDR material',
         ),
       );
     }
@@ -245,7 +272,9 @@ export function buildAddressView(
         );
         history.push({
           side: 'outgoing',
-          status: 'recovered',
+          status: 'unresolved',
+          reason:
+            'K_tx not recovered (NIP-44 open of out_ciphertext under K_out is not performed in this build)',
           coinIdHex: encodeHexLower(item.coinId),
           blobIdHex: encodeHexLower(item.blobId),
           epkHex: encodeHexLower(item.epk),
@@ -291,18 +320,22 @@ export function buildAddressView(
     ),
   );
 
-  return {
+  const result: AddressViewResult = {
     mode,
     addressHex,
     checks,
     history,
   };
+  if (noDiscoveries) {
+    result.historyNotResolvable = true;
+  }
+  return result;
 }
 
 /**
- * Live resolve: currently builds the view with empty discoveries and the
- * honest mesh-scan open step. Discovery injection is for tests / future
- * relay client wiring.
+ * Live resolve. This build has no mesh/relay client: without explicit
+ * discoveries, history is marked not-resolvable (not an empty success).
+ * Tests inject discoveries via the second argument.
  */
 export async function resolveAddressView(
   fragment: AddrFragmentOk,

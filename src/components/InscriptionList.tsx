@@ -18,9 +18,15 @@ function shortHex(hex: string, head = 8, tail = 6): string {
 export function InscriptionList({
   inscriptions,
   counts,
+  countsScopeLabel,
 }: {
   inscriptions: PublicInscription[];
   counts: PublicAggregateCounts;
+  /**
+   * When set, inscription count + transitions/block are labelled as a subset
+   * (cursor pagination). Accumulator size remains the global node value.
+   */
+  countsScopeLabel?: string;
 }) {
   return (
     <div data-testid="inscription-list" className="space-y-6">
@@ -29,7 +35,9 @@ export function InscriptionList({
         className="grid gap-3 rounded border border-line bg-surface p-4 sm:grid-cols-3"
       >
         <div>
-          <p className="text-[10px] uppercase tracking-widest text-ink3">Inscriptions</p>
+          <p className="text-[10px] uppercase tracking-widest text-ink3">
+            Inscriptions{countsScopeLabel !== undefined ? ` (${countsScopeLabel})` : ''}
+          </p>
           <p className="mt-1 font-mono text-xl tabular-nums">{counts.inscription_count}</p>
         </div>
         <div>
@@ -37,7 +45,10 @@ export function InscriptionList({
           <p className="mt-1 font-mono text-xl tabular-nums">{counts.accumulator_size}</p>
         </div>
         <div>
-          <p className="text-[10px] uppercase tracking-widest text-ink3">Transitions / block</p>
+          <p className="text-[10px] uppercase tracking-widest text-ink3">
+            Transitions / block
+            {countsScopeLabel !== undefined ? ` (${countsScopeLabel})` : ''}
+          </p>
           {counts.transitions_per_block.length === 0 ? (
             <p className="mt-1 text-sm text-ink3">—</p>
           ) : (

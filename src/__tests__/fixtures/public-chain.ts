@@ -14,6 +14,7 @@ export const FIXTURE_INFO: InfoResponse = {
   protocol_version: 'v1',
   finality_confirmations: 6,
   activation_height: 0,
+  max_blob_bytes: 1_048_576,
   features: ['explorer'],
 };
 
