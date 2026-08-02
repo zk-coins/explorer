@@ -36,14 +36,14 @@ export interface ConfirmationView {
   /** §3.10 state from node data when available; never invented. */
   state?: NullifierState;
   anchoring?: {
-    tipHeight?: number;
+    tipHeight?: bigint;
     tipBlockHash?: string;
     nullifierPresent?: boolean;
-    position?: number;
+    position?: bigint;
     /** Reveal txid when found in the inscription stream. */
     revealTxid?: string;
-    height?: number;
-    confirmations?: number;
+    height?: bigint;
+    confirmations?: bigint;
   };
   assetTermsName?: string;
   fatalError?: string;
@@ -147,10 +147,12 @@ export function openConfirmationBlob(
 }
 
 /**
- * Walk inscription cursor pages until creating Pk is found or pages are exhausted.
+ * Walk inscription cursor pages until the exact creating nullifier pair
+ * `(Pk_create, R_create)` is found or pages are exhausted.
  */
 export async function findCreatingPkInInscriptions(
   pkHex: string,
+  rHex: string,
   fetchInsc: typeof fetchInscriptions,
   opts: {
     baseUrl?: string;
@@ -161,7 +163,7 @@ export async function findCreatingPkInInscriptions(
 ): Promise<{ hit?: ReturnType<typeof stateFromInscriptions>; pagesScanned: number }> {
   const pageLimit = opts.pageLimit ?? 200;
   const maxPages = opts.maxPages ?? 50;
-  let from_height: number | undefined;
+  let from_height: bigint | undefined;
   let from_tx_index: number | undefined;
   let from_vin_index: number | undefined;
   let pagesScanned = 0;
@@ -176,7 +178,7 @@ export async function findCreatingPkInInscriptions(
       signal: opts.signal,
     });
     pagesScanned += 1;
-    const hit = stateFromInscriptions(pkHex, insc.inscriptions);
+    const hit = stateFromInscriptions(pkHex, rHex, insc.inscriptions);
     if (hit !== undefined) {
       return { hit, pagesScanned };
     }
@@ -212,7 +214,7 @@ export async function resolveConfirmationLink(
   const holders = parseHolderHint(fragment.holderHint);
 
   // max_blob_bytes is required before any untrusted body load.
-  let maxBlobBytes: number;
+  let maxBlobBytes: number | bigint;
   try {
     const info = await fetchInf({ baseUrl, signal });
     maxBlobBytes = info.max_blob_bytes;
@@ -221,7 +223,13 @@ export async function resolveConfirmationLink(
     checks.push(fail('node_info', 'GET /v1/info (max_blob_bytes)', detail));
     return { checks, fatalError: `GET /v1/info failed: ${detail}` };
   }
-  checks.push(pass('node_info', 'GET /v1/info (max_blob_bytes)', `max_blob_bytes=${maxBlobBytes}`));
+  checks.push(
+    pass(
+      'node_info',
+      'GET /v1/info (max_blob_bytes)',
+      `max_blob_bytes=${maxBlobBytes.toString(10)}`,
+    ),
+  );
 
   let ciphertext: Uint8Array;
   try {
@@ -351,6 +359,7 @@ export async function resolveConfirmationLink(
   try {
     const { hit, pagesScanned } = await findCreatingPkInInscriptions(
       creatingNullifier.pkCreateHex,
+      creatingNullifier.rCreateHex,
       fetchInsc,
       { baseUrl, signal, maxPages: maxInscriptionPages },
     );
@@ -359,13 +368,13 @@ export async function resolveConfirmationLink(
       anchoring.revealTxid = hit.txid;
       anchoring.height = hit.height;
       if (anchoring.tipHeight !== undefined) {
-        anchoring.confirmations = anchoring.tipHeight - hit.height + 1;
+        anchoring.confirmations = anchoring.tipHeight - hit.height + 1n;
       }
       checks.push(
         pass(
           'state_310',
           '§3.10 state (from node inscription data)',
-          `state=${hit.state} reveal_txid=${hit.txid} height=${hit.height} (pages=${pagesScanned})`,
+          `state=${hit.state} reveal_txid=${hit.txid} height=${hit.height.toString(10)} (pages=${pagesScanned})`,
         ),
       );
     } else {
@@ -373,7 +382,7 @@ export async function resolveConfirmationLink(
         open(
           'state_310',
           '§3.10 state (from node inscription data)',
-          `Creating Pk not found after scanning ${pagesScanned} inscription page(s) — state not asserted`,
+          `Creating (Pk, R) pair not found after scanning ${pagesScanned} inscription page(s) — state not asserted`,
         ),
       );
     }

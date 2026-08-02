@@ -130,13 +130,60 @@ export function writeU128Be(value: bigint): Uint8Array {
   return out;
 }
 
-/** Base64url without padding (RFC 4648 §5). */
-export function base64UrlDecodeNoPad(input: string): Uint8Array {
+/**
+ * Exact decoded byte length of a base64url (no-pad) string — without allocating
+ * the decoded buffer. Used to enforce size limits before `atob` / copy.
+ *
+ * Remainder 1 mod 4 is invalid base64url. Remainder 2 → +1 byte, 3 → +2 bytes.
+ */
+export function base64UrlDecodedLength(input: string): number {
   if (typeof input !== 'string' || input.length === 0) {
     throw new Error('base64url: empty input');
   }
   if (!/^[A-Za-z0-9_-]+$/.test(input)) {
     throw new Error('base64url: non-alphabet character');
+  }
+  const n = input.length;
+  const mod = n % 4;
+  if (mod === 1) {
+    throw new Error('base64url: invalid length');
+  }
+  const full = Math.floor(n / 4) * 3;
+  if (mod === 0) {
+    return full;
+  }
+  if (mod === 2) {
+    return full + 1;
+  }
+  return full + 2;
+}
+
+/** Base64url without padding (RFC 4648 §5). */
+export function base64UrlDecodeNoPad(
+  input: string,
+  opts: { maxDecodedBytes?: number } = {},
+): Uint8Array {
+  if (typeof input !== 'string' || input.length === 0) {
+    throw new Error('base64url: empty input');
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(input)) {
+    throw new Error('base64url: non-alphabet character');
+  }
+  // Size gate BEFORE atob / allocation.
+  const expectedLen = base64UrlDecodedLength(input);
+  if (opts.maxDecodedBytes !== undefined) {
+    if (
+      !Number.isInteger(opts.maxDecodedBytes) ||
+      opts.maxDecodedBytes <= 0 ||
+      !Number.isSafeInteger(opts.maxDecodedBytes)
+    ) {
+      throw new Error(
+        `base64url: maxDecodedBytes must be a positive safe integer, got ${opts.maxDecodedBytes}`,
+      );
+    }
+    if (expectedLen > opts.maxDecodedBytes) {
+      throw new Error(`base64url: decoded size ${expectedLen} exceeds max ${opts.maxDecodedBytes}`);
+    }
   }
   const padLen = (4 - (input.length % 4)) % 4;
   const padded = input.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat(padLen);
@@ -145,6 +192,9 @@ export function base64UrlDecodeNoPad(input: string): Uint8Array {
     binary = atob(padded);
   } catch {
     throw new Error('base64url: decode failed');
+  }
+  if (binary.length !== expectedLen) {
+    throw new Error(`base64url: decoded length ${binary.length} ≠ expected ${expectedLen}`);
   }
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {

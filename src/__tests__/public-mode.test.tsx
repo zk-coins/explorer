@@ -19,15 +19,19 @@ import {
 } from '@/lib/api/map';
 import {
   FIXTURE_ACCUMULATOR,
+  FIXTURE_ACCUMULATOR_RAW,
   FIXTURE_BROKEN_ACCUMULATOR,
   FIXTURE_INFO,
+  FIXTURE_INFO_RAW,
   FIXTURE_INSCRIPTIONS,
+  FIXTURE_INSCRIPTIONS_RAW,
   FIXTURE_NULLIFIER_PRESENT,
+  FIXTURE_NULLIFIER_PRESENT_RAW,
 } from './fixtures/public-chain';
 
 describe('Public-mode data mapping (§7.5 → §5.5 view)', () => {
   it('maps normative inscription shapes into Public inscriptions', () => {
-    const parsed = parseInscriptionsResponse(FIXTURE_INSCRIPTIONS);
+    const parsed = parseInscriptionsResponse(FIXTURE_INSCRIPTIONS_RAW);
     const view = mapInscriptions(parsed);
     expect(view).toHaveLength(2);
     expect(view[0]?.nullifiers).toHaveLength(2);
@@ -37,33 +41,33 @@ describe('Public-mode data mapping (§7.5 → §5.5 view)', () => {
   });
 
   it('maps accumulator root as nav_root and computes aggregate counts', () => {
-    const acc = mapAccumulator(parseAccumulatorResponse(FIXTURE_ACCUMULATOR));
-    const inscriptions = mapInscriptions(parseInscriptionsResponse(FIXTURE_INSCRIPTIONS));
+    const acc = mapAccumulator(parseAccumulatorResponse(FIXTURE_ACCUMULATOR_RAW));
+    const inscriptions = mapInscriptions(parseInscriptionsResponse(FIXTURE_INSCRIPTIONS_RAW));
     const counts = computeAggregateCounts(inscriptions, acc.size);
     expect(acc.nav_root).toBe(FIXTURE_ACCUMULATOR.root);
-    expect(acc.size).toBe(3);
+    expect(acc.size).toBe(3n);
     expect(counts.inscription_count).toBe(2);
-    expect(counts.accumulator_size).toBe(3);
+    expect(counts.accumulator_size).toBe(3n);
     expect(counts.transitions_per_block).toEqual([
-      { height: 100, transitions: 2 },
-      { height: 101, transitions: 1 },
+      { height: 100n, transitions: 2 },
+      { height: 101n, transitions: 1 },
     ]);
   });
 
   it('maps nullifier membership with client-verify caveat', () => {
-    const view = mapNullifierLookup(parseNullifierLookupResponse(FIXTURE_NULLIFIER_PRESENT));
+    const view = mapNullifierLookup(parseNullifierLookupResponse(FIXTURE_NULLIFIER_PRESENT_RAW));
     expect(view.present).toBe(true);
-    expect(view.position).toBe(0);
+    expect(view.position).toBe(0n);
     expect(view.client_must_verify_against_own_scan).toBe(true);
   });
 
   it('renders Public components without §5.5-forbidden fields', () => {
-    const inscriptions = mapInscriptions(parseInscriptionsResponse(FIXTURE_INSCRIPTIONS));
-    const accumulator = mapAccumulator(parseAccumulatorResponse(FIXTURE_ACCUMULATOR));
-    const info = mapInfo(parseInfoResponse(FIXTURE_INFO));
+    const inscriptions = mapInscriptions(parseInscriptionsResponse(FIXTURE_INSCRIPTIONS_RAW));
+    const accumulator = mapAccumulator(parseAccumulatorResponse(FIXTURE_ACCUMULATOR_RAW));
+    const info = mapInfo(parseInfoResponse(FIXTURE_INFO_RAW));
     const counts = computeAggregateCounts(inscriptions, accumulator.size);
     const nullifierLookup = mapNullifierLookup(
-      parseNullifierLookupResponse(FIXTURE_NULLIFIER_PRESENT),
+      parseNullifierLookupResponse(FIXTURE_NULLIFIER_PRESENT_RAW),
     );
 
     const { container } = render(

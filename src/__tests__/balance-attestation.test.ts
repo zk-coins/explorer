@@ -122,14 +122,26 @@ describe('§5.7 balance attestation', () => {
     expect(view.fields).toBeUndefined();
   });
 
-  it('rejects inline body larger than max_blob_bytes', async () => {
+  it('rejects inline body larger than max_blob_bytes before decoding', async () => {
     const att = sampleAttestation();
     const frag = fragmentFor(att);
-    const view = await resolveBalanceAttestation(frag, {
-      network: 'regtest',
-      maxBlobBytes: 16,
-    });
-    expect(view.fatalError).toMatch(/max_blob_bytes/);
-    expect(view.checks.find((c) => c.id === 'obtain')?.status).toBe('fail');
+    // Instrument atob: if the size gate works, decode never runs.
+    const originalAtob = globalThis.atob;
+    let atobCalls = 0;
+    globalThis.atob = ((data: string) => {
+      atobCalls += 1;
+      return originalAtob(data);
+    }) as typeof atob;
+    try {
+      const view = await resolveBalanceAttestation(frag, {
+        network: 'regtest',
+        maxBlobBytes: 16,
+      });
+      expect(view.fatalError).toMatch(/max_blob_bytes|exceeds max/);
+      expect(view.checks.find((c) => c.id === 'obtain')?.status).toBe('fail');
+      expect(atobCalls).toBe(0);
+    } finally {
+      globalThis.atob = originalAtob;
+    }
   });
 });

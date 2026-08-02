@@ -20,7 +20,7 @@ import {
 } from './types';
 
 export interface FetchInscriptionsOpts {
-  from_height?: number;
+  from_height?: bigint | number;
   from_tx_index?: number;
   from_vin_index?: number;
   limit?: number;
@@ -140,11 +140,41 @@ function requireU32(obj: Record<string, unknown>, key: string, ctx: string): num
 }
 
 /**
- * u64-as-JSON number: non-negative safe integer (exact representation only).
- * Values above Number.MAX_SAFE_INTEGER must not be accepted silently.
+ * Canonical §7.1 / §7.5 u64 JSON form: a decimal **string** matching
+ * `0|[1-9][0-9]*` in range `[0, 2^64−1]`. JSON numbers are rejected
+ * (float coercion / non-canonical). Leading zeros, `+`, whitespace, and
+ * exponents are rejected.
  */
-function requireU64Safe(obj: Record<string, unknown>, key: string, ctx: string): number {
-  return requireNonNegSafeInt(obj, key, ctx);
+const U64_CANONICAL_RE = /^(0|[1-9][0-9]*)$/;
+const U64_MAX = (1n << 64n) - 1n;
+
+function requireU64(obj: Record<string, unknown>, key: string, ctx: string): bigint {
+  const v = obj[key];
+  if (typeof v !== 'string' || !U64_CANONICAL_RE.test(v)) {
+    throw new NodeApiError(
+      200,
+      'malformed_response',
+      `${ctx}: field "${key}" must be a canonical u64 decimal string (0|[1-9][0-9]*), got ${JSON.stringify(v)}`,
+    );
+  }
+  let n: bigint;
+  try {
+    n = BigInt(v);
+  } catch {
+    throw new NodeApiError(
+      200,
+      'malformed_response',
+      `${ctx}: field "${key}" is not a valid integer string`,
+    );
+  }
+  if (n < 0n || n > U64_MAX) {
+    throw new NodeApiError(
+      200,
+      'malformed_response',
+      `${ctx}: field "${key}" out of u64 range [0, 2^64−1], got ${v}`,
+    );
+  }
+  return n;
 }
 
 function requireArray(obj: Record<string, unknown>, key: string, ctx: string): unknown[] {
@@ -187,10 +217,10 @@ export function parseInfoResponse(raw: unknown): InfoResponse {
   }
   const protocol_version = requireString(o, 'protocol_version', 'info');
   const finality_confirmations = requireU32(o, 'finality_confirmations', 'info');
-  const activation_height = requireU64Safe(o, 'activation_height', 'info');
+  const activation_height = requireU64(o, 'activation_height', 'info');
   // §7.4 size gate — required; no silent default.
-  const max_blob_bytes = requireU64Safe(o, 'max_blob_bytes', 'info');
-  if (max_blob_bytes === 0) {
+  const max_blob_bytes = requireU64(o, 'max_blob_bytes', 'info');
+  if (max_blob_bytes === 0n) {
     throw new NodeApiError(200, 'malformed_response', 'info: max_blob_bytes must be > 0');
   }
   const featuresRaw = requireArray(o, 'features', 'info');
@@ -217,10 +247,10 @@ export function parseAccumulatorResponse(raw: unknown): AccumulatorResponse {
   }
   const o = raw as Record<string, unknown>;
   return {
-    size: requireU64Safe(o, 'size', 'accumulator'),
+    size: requireU64(o, 'size', 'accumulator'),
     root: requireHex32(o, 'root', 'accumulator'),
     tip_block_hash: requireHex32(o, 'tip_block_hash', 'accumulator'),
-    tip_height: requireU64Safe(o, 'tip_height', 'accumulator'),
+    tip_height: requireU64(o, 'tip_height', 'accumulator'),
   };
 }
 
@@ -246,7 +276,7 @@ export function parseInscriptionsResponse(raw: unknown): InscriptionsResponse {
 
   const result: InscriptionsResponse = { inscriptions };
   if (cursorCount === 3) {
-    result.next_height = requireU64Safe(o, 'next_height', 'inscriptions');
+    result.next_height = requireU64(o, 'next_height', 'inscriptions');
     result.next_tx_index = requireU32(o, 'next_tx_index', 'inscriptions');
     result.next_vin_index = requireU32(o, 'next_vin_index', 'inscriptions');
   }
@@ -299,7 +329,7 @@ function parseInscriptionEntry(
   }
   return {
     txid: requireHex32(o, 'txid', ctx),
-    height: requireU64Safe(o, 'height', ctx),
+    height: requireU64(o, 'height', ctx),
     tx_index: requireU32(o, 'tx_index', ctx),
     vin_index: requireU32(o, 'vin_index', ctx),
     count,
@@ -360,14 +390,14 @@ export function parseNullifierLookupResponse(raw: unknown): NullifierLookupRespo
   const base: NullifierLookupResponse = {
     present: o.present,
     audit_path,
-    tree_size: requireU64Safe(o, 'tree_size', 'nullifier'),
+    tree_size: requireU64(o, 'tree_size', 'nullifier'),
     root: requireHex32(o, 'root', 'nullifier'),
     tip_block_hash: requireHex32(o, 'tip_block_hash', 'nullifier'),
-    tip_height: requireU64Safe(o, 'tip_height', 'nullifier'),
+    tip_height: requireU64(o, 'tip_height', 'nullifier'),
   };
 
   if (o.present) {
-    base.position = requireU64Safe(o, 'position', 'nullifier (present)');
+    base.position = requireU64(o, 'position', 'nullifier (present)');
     base.leaf = requireHex32(o, 'leaf', 'nullifier (present)');
   }
   return base;

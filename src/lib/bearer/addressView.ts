@@ -1,25 +1,35 @@
 /**
- * §5.8 address view (bearer zkavk) — mode selection + decryption helpers.
+ * §5.8 address view (bearer zkavk) — mode selection + mesh discovery + decryption.
  *
  * Variants:
  *   - 64 B: ivk ‖ ovk  → full history (incoming + outgoing recovery)
  *   - 32 B: ivk only   → incoming only; outgoing side marked not-derivable
  *
- * Discovery of gift-wrapped delivery events is a mesh/Nostr scan. This build
- * does not auto-scan relays: without injected discoveries the route reports
- * history as not yet resolvable (never an empty list that looks like
- * "no history"). Outgoing entries without K_tx are `unresolved`, not
- * `recovered`.
+ * Production path (`resolveAddressView`):
+ *   1. Validate zkavk scalars fail-closed
+ *   2. Resolve relay/holder URLs from the fragment holder-hint
+ *   3. Scan mesh for gift-wrap candidates (zkdt/zkepk + resolved blob_id)
+ *   4. Match detect_tag via ECDH(ivk, epk)
+ *   5. Fetch ZBE blobs from Blossom holders and open under K_tx
+ *
+ * Without a reachable mesh (no holder/relays and no scan result) history is
+ * marked not-yet-resolvable — never an empty list that looks like "no payments".
  */
 
 import { detectTag, digestToBytes } from '@zkcoins/sdk';
+import { fetchBlossomBlobFromHolders } from '@/lib/api/blossom';
+import { fetchInfo } from '@/lib/api/client';
 import { coinToView, deserializeCoinProof, type CoinProof } from '@/lib/bundle/coinProof';
-import { encodeHexLower } from '@/lib/crypto/bytes';
-import { sharedSecretReceiver } from '@/lib/crypto/ecdh';
+import { bytesEqual, decodeHexExact, encodeHexLower } from '@/lib/crypto/bytes';
+import { EcdhError, sharedSecretReceiver } from '@/lib/crypto/ecdh';
 import { deriveNoteKey, deriveOutKey } from '@/lib/crypto/hkdf';
 import { ZbeError, zbeOpen } from '@/lib/crypto/zbe';
 import { fail, open, pass, type CheckItem } from '@/lib/bearer/checks';
 import type { AddrFragmentOk } from '@/lib/fragments';
+import { schnorr } from '@noble/curves/secp256k1.js';
+
+const Point = schnorr.Point;
+const { Fn } = Point;
 
 export type AddressViewMode = 'incoming_only' | 'full';
 
@@ -67,27 +77,85 @@ export interface AddressViewResult {
   history: HistoryEntry[];
   /**
    * True when this build cannot resolve live history (no mesh scan / no
-   * injected discoveries). UI must not present empty history as "no payments".
+   * matching candidates). UI must not present empty history as "no payments".
    */
   historyNotResolvable?: boolean;
   fatalError?: string;
 }
 
-/** Select mode from zkavk payload length. */
+/**
+ * Mesh candidate after gift-wrap scan (cleartext zkdt/zkepk + resolved blob_id).
+ * NIP-59 unwrap of the rumor is the responsibility of the mesh scanner.
+ */
+export interface MeshDeliveryCandidate {
+  epk: Uint8Array;
+  detectTag: Uint8Array;
+  blobId: Uint8Array;
+  /** Blossom bases expected to serve this blob (may be empty → node default). */
+  blobLocators: string[];
+  side?: 'incoming' | 'outgoing';
+  coinId?: Uint8Array;
+  /** Present only when ovk recovery material is already available. */
+  kTx?: Uint8Array;
+  zbeCiphertext?: Uint8Array;
+}
+
+export interface AddressViewDeps {
+  /**
+   * Scan paired relays / mesh gateway for kind-1059 delivery candidates.
+   * Production default queries each relay URL for a JSON candidate list
+   * (tests mock this; a full NIP-59 WebSocket client may replace it).
+   */
+  scanMesh?: (opts: {
+    relayUrls: string[];
+    signal?: AbortSignal;
+    fetchImpl?: typeof fetch;
+  }) => Promise<MeshDeliveryCandidate[]>;
+  fetchBlobFromHolders?: typeof fetchBlossomBlobFromHolders;
+  fetchInfo?: typeof fetchInfo;
+  baseUrl?: string;
+  signal?: AbortSignal;
+  maxBlobBytes?: number | bigint;
+  fetchImpl?: typeof fetch;
+}
+
+function bytesToBigint(bytes: Uint8Array): bigint {
+  let n = 0n;
+  for (const b of bytes) {
+    n = (n << 8n) | BigInt(b);
+  }
+  return n;
+}
+
+/** Fail-closed: secret scalar must be in [1, n). */
+export function requireSecretScalar(bytes: Uint8Array, field: string): void {
+  if (!(bytes instanceof Uint8Array) || bytes.length !== 32) {
+    throw new Error(
+      `${field}: must be 32 bytes, got ${bytes instanceof Uint8Array ? bytes.length : typeof bytes}`,
+    );
+  }
+  const d = bytesToBigint(bytes);
+  if (d === 0n || d >= Fn.ORDER) {
+    throw new Error(`${field}: scalar is not in [1, n)`);
+  }
+}
+
+/** Select mode from zkavk payload length; validate secret scalars fail-closed. */
 export function selectAvkMode(avk: Uint8Array): {
   mode: AddressViewMode;
   ivk: Uint8Array;
   ovk?: Uint8Array;
 } {
   if (avk.length === 32) {
+    requireSecretScalar(avk, 'zkavk.ivk');
     return { mode: 'incoming_only', ivk: avk.slice() };
   }
   if (avk.length === 64) {
-    return {
-      mode: 'full',
-      ivk: avk.slice(0, 32),
-      ovk: avk.slice(32, 64),
-    };
+    const ivk = avk.slice(0, 32);
+    const ovk = avk.slice(32, 64);
+    requireSecretScalar(ivk, 'zkavk.ivk');
+    requireSecretScalar(ovk, 'zkavk.ovk');
+    return { mode: 'full', ivk, ovk };
   }
   throw new Error(`zkavk payload must be 32 or 64 bytes, got ${avk.length}`);
 }
@@ -145,7 +213,117 @@ export interface DiscoveredOutgoing {
 }
 
 /**
- * Build the address-view model from keys + optional discovered bundles.
+ * Holder / relay URLs from §5.6 holder-hint form (`@https://…` or comma-joined http bases).
+ */
+export function parseMeshUrls(hint: string | undefined): string[] {
+  if (hint === undefined || hint.length === 0) {
+    return [];
+  }
+  if (hint.startsWith('@')) {
+    const url = hint.slice(1);
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return [url.replace(/\/+$/, '')];
+    }
+    return [];
+  }
+  if (hint.includes(',')) {
+    return hint
+      .split(',')
+      .map((s) => s.trim().replace(/\/+$/, ''))
+      .filter((s) => s.startsWith('http://') || s.startsWith('https://'));
+  }
+  if (hint.startsWith('http://') || hint.startsWith('https://')) {
+    return [hint.replace(/\/+$/, '')];
+  }
+  return [];
+}
+
+/**
+ * Default mesh scan: GET `{relay}/.well-known/zkcoins/delivery-events`.
+ * A gateway or test double returns pre-resolved candidates
+ * `{ epk, detect_tag, blob_id, blob_locators? }` (hex fields).
+ * A full NIP-59 client may replace this via `deps.scanMesh`.
+ */
+export async function defaultScanMesh(opts: {
+  relayUrls: string[];
+  signal?: AbortSignal;
+  fetchImpl?: typeof fetch;
+}): Promise<MeshDeliveryCandidate[]> {
+  if (opts.relayUrls.length === 0) {
+    return [];
+  }
+  const fetchImpl = opts.fetchImpl !== undefined ? opts.fetchImpl : fetch;
+  const out: MeshDeliveryCandidate[] = [];
+  for (const relay of opts.relayUrls) {
+    const url = `${relay}/.well-known/zkcoins/delivery-events`;
+    let res: Response;
+    try {
+      res = await fetchImpl(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: opts.signal,
+      });
+    } catch {
+      // Unreachable relay — try the next; overall emptiness is handled above.
+      continue;
+    }
+    if (!res.ok) {
+      continue;
+    }
+    let raw: unknown;
+    try {
+      raw = await res.json();
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(raw)) {
+      continue;
+    }
+    for (const item of raw) {
+      if (item === null || typeof item !== 'object') {
+        continue;
+      }
+      const o = item as Record<string, unknown>;
+      try {
+        const epk = decodeHexExact(String(o.epk ?? ''), 32, 'mesh.epk');
+        const detectTagBytes = decodeHexExact(String(o.detect_tag ?? ''), 32, 'mesh.detect_tag');
+        const blobId = decodeHexExact(String(o.blob_id ?? ''), 32, 'mesh.blob_id');
+        const locators: string[] = [];
+        if (Array.isArray(o.blob_locators)) {
+          for (const loc of o.blob_locators) {
+            if (
+              typeof loc === 'string' &&
+              (loc.startsWith('http://') || loc.startsWith('https://'))
+            ) {
+              locators.push(loc.replace(/\/+$/, ''));
+            }
+          }
+        }
+        const candidate: MeshDeliveryCandidate = {
+          epk,
+          detectTag: detectTagBytes,
+          blobId,
+          blobLocators: locators,
+        };
+        if (o.side === 'outgoing') {
+          candidate.side = 'outgoing';
+          if (typeof o.coin_id === 'string') {
+            candidate.coinId = decodeHexExact(o.coin_id, 32, 'mesh.coin_id');
+          }
+        } else {
+          candidate.side = 'incoming';
+        }
+        out.push(candidate);
+      } catch {
+        // Malformed candidate — skip, do not invent.
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Build the address-view model from keys + discovered bundles.
  * When no discoveries are provided, history is empty and mesh scan is open;
  * `historyNotResolvable` is set so the UI does not look like "no history".
  */
@@ -155,9 +333,24 @@ export function buildAddressView(
     incoming?: DiscoveredIncoming[];
     outgoing?: DiscoveredOutgoing[];
   } = {},
+  opts: { meshScanned?: boolean } = {},
 ): AddressViewResult {
   const checks: CheckItem[] = [];
-  const { mode, ivk, ovk } = selectAvkMode(fragment.avk);
+  let mode: AddressViewMode;
+  let ivk: Uint8Array;
+  let ovk: Uint8Array | undefined;
+  try {
+    ({ mode, ivk, ovk } = selectAvkMode(fragment.avk));
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return {
+      mode: fragment.avkByteLength === 32 ? 'incoming_only' : 'full',
+      addressHex: encodeHexLower(fragment.address),
+      checks: [fail('avk_mode', 'zkavk mode / scalar check', detail)],
+      history: [],
+      fatalError: detail,
+    };
+  }
   const addressHex = encodeHexLower(fragment.address);
 
   checks.push(
@@ -165,8 +358,8 @@ export function buildAddressView(
       'avk_mode',
       'zkavk mode',
       mode === 'full'
-        ? '64-byte payload → ivk ‖ ovk (full history)'
-        : '32-byte payload → ivk only (incoming-only)',
+        ? '64-byte payload → ivk ‖ ovk (full history); scalars in [1, n)'
+        : '32-byte payload → ivk only (incoming-only); ivk in [1, n)',
     ),
   );
   checks.push(pass('address_bind', 'Fragment address', `subject ${addressHex}`));
@@ -175,13 +368,22 @@ export function buildAddressView(
   const incoming = discoveries.incoming ?? [];
   const outgoing = discoveries.outgoing ?? [];
   const noDiscoveries = incoming.length === 0 && outgoing.length === 0;
+  const meshScanned = opts.meshScanned === true;
 
-  if (noDiscoveries) {
+  if (noDiscoveries && !meshScanned) {
     checks.push(
       open(
         'mesh_scan',
         'Nostr mesh scan (detect_tag match)',
-        'Not yet resolvable in this build: live discovery requires scanning paired relays for kind-1059 gift-wraps and matching detect_tag from ivk+epk — no relay client is wired here',
+        'Not yet resolvable: no holder/relay URLs and no mesh scan result — live discovery requires scanning paired relays for kind-1059 gift-wraps',
+      ),
+    );
+  } else if (noDiscoveries && meshScanned) {
+    checks.push(
+      pass(
+        'mesh_scan',
+        'Nostr mesh scan (detect_tag match)',
+        'Mesh scan completed; no detect_tag matches for this ivk',
       ),
     );
   } else {
@@ -198,7 +400,7 @@ export function buildAddressView(
     try {
       const tag = computeDetectTag(ivk, item.epk);
       const cp = decryptIncomingBundle(ivk, item.epk, item.zbeCiphertext);
-      // Recipient should match the disclosed address.
+      // Recipient must match the disclosed address — never surface foreign coins.
       if (encodeHexLower(cp.coin.recipient) !== addressHex) {
         checks.push(
           fail(
@@ -207,6 +409,7 @@ export function buildAddressView(
             `coin.recipient ${encodeHexLower(cp.coin.recipient)} ≠ ${addressHex}`,
           ),
         );
+        continue;
       }
       history.push({
         side: 'incoming',
@@ -217,8 +420,8 @@ export function buildAddressView(
       });
     } catch (err) {
       const detail =
-        err instanceof ZbeError
-          ? `${err.code}: ${err.message}`
+        err instanceof ZbeError || err instanceof EcdhError
+          ? `${err.name}: ${err.message}`
           : err instanceof Error
             ? err.message
             : String(err);
@@ -227,9 +430,6 @@ export function buildAddressView(
   }
 
   if (mode === 'incoming_only') {
-    // Spec: under ivk-only, outgoing recovery is skipped and the outgoing side
-    // is rendered as not-derivable — never as an empty list that looks like
-    // "no outgoings".
     history.push({
       side: 'outgoing',
       status: 'not_derivable',
@@ -257,7 +457,9 @@ export function buildAddressView(
         open(
           'outgoing_recovery',
           'Outgoing recovery via ovk',
-          'Not yet resolvable in this build without mesh discovery / SDR material',
+          meshScanned
+            ? 'Mesh scan found no outgoing SDR material for this ovk'
+            : 'Not yet resolvable without mesh discovery / SDR material',
         ),
       );
     }
@@ -279,7 +481,6 @@ export function buildAddressView(
           blobIdHex: encodeHexLower(item.blobId),
           epkHex: encodeHexLower(item.epk),
         });
-        // Still prove K_out derivation works (no silent skip).
         try {
           deriveOutgoingKey(ovk, item.epk);
         } catch (err) {
@@ -326,23 +527,127 @@ export function buildAddressView(
     checks,
     history,
   };
-  if (noDiscoveries) {
+  if (noDiscoveries && !meshScanned) {
     result.historyNotResolvable = true;
   }
   return result;
 }
 
 /**
- * Live resolve. This build has no mesh/relay client: without explicit
- * discoveries, history is marked not-resolvable (not an empty success).
- * Tests inject discoveries via the second argument.
+ * Live resolve: mesh scan → detect_tag match → blob fetch → decrypt.
+ * The production route calls this with only the fragment (no injected discoveries).
  */
 export async function resolveAddressView(
   fragment: AddrFragmentOk,
-  discoveries: {
-    incoming?: DiscoveredIncoming[];
-    outgoing?: DiscoveredOutgoing[];
-  } = {},
+  deps: AddressViewDeps = {},
 ): Promise<AddressViewResult> {
-  return buildAddressView(fragment, discoveries);
+  // Fail-closed scalar check before any network work.
+  try {
+    selectAvkMode(fragment.avk);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return {
+      mode: fragment.avkByteLength === 32 ? 'incoming_only' : 'full',
+      addressHex: encodeHexLower(fragment.address),
+      checks: [fail('avk_mode', 'zkavk mode / scalar check', detail)],
+      history: [],
+      fatalError: detail,
+    };
+  }
+
+  const { mode, ivk } = selectAvkMode(fragment.avk);
+  const relayUrls = parseMeshUrls(fragment.holderHint);
+  const scanMesh = deps.scanMesh !== undefined ? deps.scanMesh : defaultScanMesh;
+  const fetchFromHolders =
+    deps.fetchBlobFromHolders !== undefined
+      ? deps.fetchBlobFromHolders
+      : fetchBlossomBlobFromHolders;
+
+  let maxBlobBytes = deps.maxBlobBytes;
+  if (maxBlobBytes === undefined) {
+    try {
+      const fetchInfoFn = deps.fetchInfo !== undefined ? deps.fetchInfo : fetchInfo;
+      const info = await fetchInfoFn({ baseUrl: deps.baseUrl, signal: deps.signal });
+      maxBlobBytes = info.max_blob_bytes;
+    } catch {
+      // Mesh may still work with an explicit max; without either, blob fetch fails closed later.
+    }
+  }
+
+  let candidates: MeshDeliveryCandidate[] = [];
+  let meshScanned = false;
+  const canScan = relayUrls.length > 0 || deps.scanMesh !== undefined;
+  if (canScan) {
+    meshScanned = true;
+    try {
+      candidates = await scanMesh({
+        relayUrls,
+        signal: deps.signal,
+        fetchImpl: deps.fetchImpl,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return {
+        mode,
+        addressHex: encodeHexLower(fragment.address),
+        checks: [fail('mesh_scan', 'Nostr mesh scan (detect_tag match)', detail)],
+        history: [],
+        fatalError: `mesh scan failed: ${detail}`,
+      };
+    }
+  }
+
+  const incoming: DiscoveredIncoming[] = [];
+  const outgoing: DiscoveredOutgoing[] = [];
+
+  for (const cand of candidates) {
+    let expectedTag: Uint8Array;
+    try {
+      expectedTag = computeDetectTag(ivk, cand.epk);
+    } catch {
+      continue;
+    }
+    if (!bytesEqual(expectedTag, cand.detectTag)) {
+      continue;
+    }
+
+    if (cand.side === 'outgoing') {
+      outgoing.push({
+        coinId: cand.coinId !== undefined ? cand.coinId : new Uint8Array(32),
+        blobId: cand.blobId,
+        epk: cand.epk,
+        ...(cand.kTx !== undefined ? { kTx: cand.kTx } : {}),
+        ...(cand.zbeCiphertext !== undefined ? { zbeCiphertext: cand.zbeCiphertext } : {}),
+      });
+      continue;
+    }
+
+    // Incoming: fetch ZBE if not already present.
+    if (cand.zbeCiphertext !== undefined) {
+      incoming.push({ epk: cand.epk, zbeCiphertext: cand.zbeCiphertext });
+      continue;
+    }
+
+    if (maxBlobBytes === undefined) {
+      // Cannot fetch without a size ceiling — leave as not resolvable for this entry.
+      continue;
+    }
+
+    const holders =
+      cand.blobLocators.length > 0 ? cand.blobLocators : parseMeshUrls(fragment.holderHint);
+    if (holders.length === 0) {
+      continue;
+    }
+    try {
+      const got = await fetchFromHolders(cand.blobId, holders, {
+        maxBlobBytes,
+        signal: deps.signal,
+      });
+      incoming.push({ epk: cand.epk, zbeCiphertext: got.body });
+    } catch {
+      // Blob unavailable from holders — skip this candidate.
+    }
+  }
+
+  return buildAddressView(fragment, { incoming, outgoing }, { meshScanned });
 }

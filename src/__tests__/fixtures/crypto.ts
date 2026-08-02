@@ -55,7 +55,8 @@ export function sampleCoinProof(seed: number, overrides: Partial<CoinProof> = {}
     creatingNullifier: {
       pkCreate: xOnlyFromSeed(seed + 6),
       rCreate: xOnlyFromSeed(seed + 7),
-      rPrimeCreate: fill(32, seed + 8),
+      // R'_create is an x-only S2C pre-nonce — must lift like R/Pk/epk.
+      rPrimeCreate: xOnlyFromSeed(seed + 8),
     },
     navOpening: {
       size: 42n,

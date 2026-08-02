@@ -18,7 +18,7 @@ import { InscriptionList } from '@/components/InscriptionList';
 import { LoadingState } from '@/components/LoadingState';
 
 interface PageCursor {
-  next_height: number;
+  next_height: bigint;
   next_tx_index: number;
   next_vin_index: number;
 }

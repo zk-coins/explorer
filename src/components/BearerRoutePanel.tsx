@@ -30,27 +30,45 @@ export function BearerRoutePanel({ kind }: { kind: Kind }) {
   const [tx, setTx] = useState<TxFragmentResult | null>(null);
   const [balance, setBalance] = useState<BalanceFragmentResult | null>(null);
   const [addr, setAddr] = useState<AddrFragmentResult | null>(null);
+  /** Bumps on every hash parse so child bodies remount and drop stale views. */
+  const [fragmentEpoch, setFragmentEpoch] = useState(0);
 
   useEffect(() => {
     // Client-only: fragment is never available to the static export server.
     // Do not move this parse into a server component or pass the hash via query.
-    const hash = readLocationHash();
-    if (kind === 'tx') {
-      setTx(parseTxFragment(hash));
-    } else if (kind === 'balance') {
-      setBalance(parseBalanceFragment(hash));
-    } else {
-      setAddr(parseAddrFragment(hash));
-    }
+    const parse = () => {
+      const hash = readLocationHash();
+      // Clear sibling kinds so a cross-route soft navigation never shows stale data.
+      if (kind === 'tx') {
+        setTx(parseTxFragment(hash));
+        setBalance(null);
+        setAddr(null);
+      } else if (kind === 'balance') {
+        setBalance(parseBalanceFragment(hash));
+        setTx(null);
+        setAddr(null);
+      } else {
+        setAddr(parseAddrFragment(hash));
+        setTx(null);
+        setBalance(null);
+      }
+      setFragmentEpoch((e) => e + 1);
+    };
+    parse();
+    // Fragment-only navigation does not remount the route — re-parse on hashchange.
+    window.addEventListener('hashchange', parse);
+    return () => {
+      window.removeEventListener('hashchange', parse);
+    };
   }, [kind]);
 
   if (kind === 'tx') {
-    return <TxBody result={tx} />;
+    return <TxBody key={`tx-${fragmentEpoch}`} result={tx} />;
   }
   if (kind === 'balance') {
-    return <BalanceBody result={balance} />;
+    return <BalanceBody key={`balance-${fragmentEpoch}`} result={balance} />;
   }
-  return <AddrBody result={addr} />;
+  return <AddrBody key={`addr-${fragmentEpoch}`} result={addr} />;
 }
 
 function TxBody({ result }: { result: TxFragmentResult | null }) {
@@ -326,9 +344,8 @@ function AddrBody({ result }: { result: AddrFragmentResult | null }) {
               history · not yet resolvable in this build
             </p>
             <p className="mt-1 text-ink2">
-              Nostr mesh discovery is not wired here. An empty list below is not a verified &quot;no
-              payments&quot; result — only decoded/unverified material from injected discoveries
-              would appear.
+              Nostr mesh discovery did not yield resolvable history for this link (no holder/relay
+              scan result). An empty list below is not a verified &quot;no payments&quot; result.
             </p>
           </div>
         )}

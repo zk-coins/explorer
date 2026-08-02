@@ -27,7 +27,12 @@ import {
   deserializeBalanceAttestationV1,
   type BalanceAttestationV1,
 } from '@/lib/bundle/balanceAttestation';
-import { base64UrlDecodeNoPad, bytesEqual, encodeHexLower } from '@/lib/crypto/bytes';
+import {
+  base64UrlDecodeNoPad,
+  base64UrlDecodedLength,
+  bytesEqual,
+  encodeHexLower,
+} from '@/lib/crypto/bytes';
 import { sha256 } from '@/lib/crypto/sha256';
 import { fail, open, pass, type CheckItem } from '@/lib/bearer/checks';
 import type { BalanceFragmentOk } from '@/lib/fragments';
@@ -50,7 +55,7 @@ export interface BalanceDeps {
    */
   network?: NetworkTag;
   /** Override max_blob_bytes (tests). Production always loads from /v1/info. */
-  maxBlobBytes?: number;
+  maxBlobBytes?: number | bigint;
 }
 
 function parseBlobLocatorSet(hint: string | undefined): string[] {
@@ -248,8 +253,12 @@ export async function resolveBalanceAttestation(
       };
     }
     try {
-      body = base64UrlDecodeNoPad(fragment.attestationInline);
-      assertDecodedSize(body.length, maxBlobBytes, 'inline BalanceAttestationV1');
+      // Size limit BEFORE atob / allocation (base64url length → decoded size).
+      const expectedLen = base64UrlDecodedLength(fragment.attestationInline);
+      assertDecodedSize(expectedLen, maxBlobBytes, 'inline BalanceAttestationV1');
+      body = base64UrlDecodeNoPad(fragment.attestationInline, {
+        maxDecodedBytes: typeof maxBlobBytes === 'bigint' ? Number(maxBlobBytes) : maxBlobBytes,
+      });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       return {

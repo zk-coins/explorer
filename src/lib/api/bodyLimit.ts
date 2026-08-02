@@ -9,6 +9,30 @@
 import { NodeApiError } from '@/lib/api/types';
 
 /**
+ * Convert a wire `u64` (bigint) into a safe integer for byte-size gates.
+ * Values above `Number.MAX_SAFE_INTEGER` cannot bound a JS allocation — fail closed.
+ */
+export function u64ToSafeByteLimit(maxBytes: bigint | number, ctx: string): number {
+  if (typeof maxBytes === 'bigint') {
+    if (maxBytes <= 0n || maxBytes > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(
+        `${ctx}: maxBytes must be in (0, MAX_SAFE_INTEGER], got ${maxBytes.toString(10)}`,
+      );
+    }
+    return Number(maxBytes);
+  }
+  if (
+    typeof maxBytes !== 'number' ||
+    !Number.isInteger(maxBytes) ||
+    maxBytes <= 0 ||
+    !Number.isSafeInteger(maxBytes)
+  ) {
+    throw new Error(`${ctx}: maxBytes must be a positive safe integer, got ${maxBytes}`);
+  }
+  return maxBytes;
+}
+
+/**
  * Read a Response body as bytes, rejecting when:
  * - Content-Length is present and exceeds `maxBytes`
  * - Content-Length is present and mismatches the actual body length
@@ -16,12 +40,10 @@ import { NodeApiError } from '@/lib/api/types';
  */
 export async function readArrayBufferLimited(
   res: Response,
-  maxBytes: number,
+  maxBytes: number | bigint,
   ctx: string,
 ): Promise<Uint8Array> {
-  if (!Number.isInteger(maxBytes) || maxBytes <= 0 || !Number.isSafeInteger(maxBytes)) {
-    throw new Error(`${ctx}: maxBytes must be a positive safe integer, got ${maxBytes}`);
-  }
+  maxBytes = u64ToSafeByteLimit(maxBytes, ctx);
 
   const clHeader = res.headers.get('content-length');
   if (clHeader !== null) {
@@ -119,18 +141,20 @@ export async function readArrayBufferLimited(
 }
 
 /** Reject an already-decoded payload larger than max_blob_bytes. */
-export function assertDecodedSize(byteLength: number, maxBytes: number, ctx: string): void {
-  if (!Number.isInteger(maxBytes) || maxBytes <= 0 || !Number.isSafeInteger(maxBytes)) {
-    throw new Error(`${ctx}: maxBytes must be a positive safe integer, got ${maxBytes}`);
-  }
+export function assertDecodedSize(
+  byteLength: number,
+  maxBytes: number | bigint,
+  ctx: string,
+): void {
+  const limit = u64ToSafeByteLimit(maxBytes, ctx);
   if (!Number.isInteger(byteLength) || byteLength < 0) {
     throw new Error(`${ctx}: byteLength must be a non-negative integer`);
   }
-  if (byteLength > maxBytes) {
+  if (byteLength > limit) {
     throw new NodeApiError(
       200,
       'blob_too_large',
-      `${ctx}: decoded size ${byteLength} exceeds max_blob_bytes ${maxBytes}`,
+      `${ctx}: decoded size ${byteLength} exceeds max_blob_bytes ${limit}`,
     );
   }
 }

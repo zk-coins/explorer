@@ -4,6 +4,8 @@
  * These models intentionally omit every §5.5-forbidden field: amounts,
  * asset_id / asset names, balances, addresses, senders, recipients, and
  * anything sourced from a CoinProof bundle. There is no UTXO/output graph.
+ *
+ * Wire `u64` values are carried as `bigint` (canonical decimal-string parse).
  */
 
 import type {
@@ -35,7 +37,7 @@ export interface PublicNullifierMember {
  */
 export interface PublicInscription {
   txid: string;
-  height: number;
+  height: bigint;
   tx_index: number;
   vin_index: number;
   /** Number of half-aggregated members (per-block transition count unit). */
@@ -53,18 +55,18 @@ export interface PublicAggregateCounts {
    * Per-block transition counts: sum of `count` (nullifier members) per
    * Bitcoin block height in the presented set.
    */
-  transitions_per_block: Array<{ height: number; transitions: number }>;
+  transitions_per_block: Array<{ height: bigint; transitions: number }>;
   /** Global accumulator size (first-occurrence fold length). */
-  accumulator_size: number;
+  accumulator_size: bigint;
 }
 
 /** Accumulator view: (size, nav_root) with tip anchoring. */
 export interface PublicAccumulatorView {
-  size: number;
+  size: bigint;
   /** nav_root = Hc("NfLog/Root", size ‖ mth) — API field `root` (§7.5). */
   nav_root: string;
   tip_block_hash: string;
-  tip_height: number;
+  tip_height: bigint;
 }
 
 /** Network context shown alongside Public data. */
@@ -72,7 +74,7 @@ export interface PublicNetworkInfo {
   network: InfoResponse['network'];
   protocol_version: string;
   finality_confirmations: number;
-  activation_height: number;
+  activation_height: bigint;
 }
 
 /**
@@ -84,13 +86,13 @@ export interface PublicNetworkInfo {
  */
 export interface PublicNullifierLookup {
   present: boolean;
-  position?: number;
+  position?: bigint;
   leaf?: string;
   audit_path: string[];
-  tree_size: number;
+  tree_size: bigint;
   nav_root: string;
   tip_block_hash: string;
-  tip_height: number;
+  tip_height: bigint;
   /** Always true in the view model — UI must surface the Path-B caveat. */
   client_must_verify_against_own_scan: true;
 }
@@ -162,9 +164,9 @@ export function mapNullifierLookup(response: NullifierLookupResponse): PublicNul
  */
 export function computeAggregateCounts(
   inscriptions: PublicInscription[],
-  accumulatorSize: number,
+  accumulatorSize: bigint,
 ): PublicAggregateCounts {
-  const byHeight = new Map<number, number>();
+  const byHeight = new Map<bigint, number>();
   for (const ins of inscriptions) {
     const prev = byHeight.get(ins.height);
     const add = ins.count;
@@ -176,7 +178,7 @@ export function computeAggregateCounts(
   }
   const transitions_per_block = Array.from(byHeight.entries())
     .map(([height, transitions]) => ({ height, transitions }))
-    .sort((a, b) => a.height - b.height);
+    .sort((a, b) => (a.height < b.height ? -1 : a.height > b.height ? 1 : 0));
 
   return {
     inscription_count: inscriptions.length,
@@ -200,18 +202,18 @@ export function publicViewToSearchableText(input: {
   parts.push(`network=${input.info.network}`);
   parts.push(`protocol_version=${input.info.protocol_version}`);
   parts.push(`finality_confirmations=${input.info.finality_confirmations}`);
-  parts.push(`activation_height=${input.info.activation_height}`);
+  parts.push(`activation_height=${input.info.activation_height.toString(10)}`);
   parts.push(`nav_root=${input.accumulator.nav_root}`);
-  parts.push(`accumulator_size=${input.accumulator.size}`);
+  parts.push(`accumulator_size=${input.accumulator.size.toString(10)}`);
   parts.push(`tip_block_hash=${input.accumulator.tip_block_hash}`);
-  parts.push(`tip_height=${input.accumulator.tip_height}`);
+  parts.push(`tip_height=${input.accumulator.tip_height.toString(10)}`);
   parts.push(`inscription_count=${input.counts.inscription_count}`);
   for (const row of input.counts.transitions_per_block) {
-    parts.push(`block=${row.height}:transitions=${row.transitions}`);
+    parts.push(`block=${row.height.toString(10)}:transitions=${row.transitions}`);
   }
   for (const ins of input.inscriptions) {
     parts.push(`txid=${ins.txid}`);
-    parts.push(`height=${ins.height}`);
+    parts.push(`height=${ins.height.toString(10)}`);
     parts.push(`tx_index=${ins.tx_index}`);
     parts.push(`vin_index=${ins.vin_index}`);
     parts.push(`count=${ins.count}`);
@@ -226,12 +228,12 @@ export function publicViewToSearchableText(input: {
   if (input.nullifierLookup !== undefined) {
     const nl = input.nullifierLookup;
     parts.push(`lookup_present=${nl.present}`);
-    parts.push(`lookup_tree_size=${nl.tree_size}`);
+    parts.push(`lookup_tree_size=${nl.tree_size.toString(10)}`);
     parts.push(`lookup_nav_root=${nl.nav_root}`);
     parts.push(`lookup_tip_block_hash=${nl.tip_block_hash}`);
-    parts.push(`lookup_tip_height=${nl.tip_height}`);
+    parts.push(`lookup_tip_height=${nl.tip_height.toString(10)}`);
     if (nl.position !== undefined) {
-      parts.push(`lookup_position=${nl.position}`);
+      parts.push(`lookup_position=${nl.position.toString(10)}`);
     }
     if (nl.leaf !== undefined) {
       parts.push(`lookup_leaf=${nl.leaf}`);

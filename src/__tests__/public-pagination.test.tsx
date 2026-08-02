@@ -5,7 +5,11 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { PublicHome } from '@/components/PublicHome';
-import { FIXTURE_ACCUMULATOR, FIXTURE_INFO, FIXTURE_INSCRIPTIONS } from './fixtures/public-chain';
+import {
+  FIXTURE_ACCUMULATOR_RAW,
+  FIXTURE_INFO_RAW,
+  FIXTURE_INSCRIPTIONS_RAW,
+} from './fixtures/public-chain';
 
 describe('PublicHome pagination', () => {
   beforeEach(() => {
@@ -17,8 +21,8 @@ describe('PublicHome pagination', () => {
 
   it('labels loaded subset and loads next cursor page', async () => {
     const page1 = {
-      ...FIXTURE_INSCRIPTIONS,
-      next_height: 200,
+      ...FIXTURE_INSCRIPTIONS_RAW,
+      next_height: '200',
       next_tx_index: 0,
       next_vin_index: 0,
     };
@@ -26,7 +30,7 @@ describe('PublicHome pagination', () => {
       inscriptions: [
         {
           txid: 'ee'.repeat(32),
-          height: 200,
+          height: '200',
           tx_index: 0,
           vin_index: 0,
           count: 1,
@@ -47,10 +51,10 @@ describe('PublicHome pagination', () => {
     const fetchMock = vi.fn().mockImplementation(async (url: string) => {
       const u = String(url);
       if (u.includes('/v1/info')) {
-        return { ok: true, json: async () => FIXTURE_INFO };
+        return { ok: true, json: async () => FIXTURE_INFO_RAW };
       }
       if (u.includes('/v1/chain/accumulator')) {
-        return { ok: true, json: async () => FIXTURE_ACCUMULATOR };
+        return { ok: true, json: async () => FIXTURE_ACCUMULATOR_RAW };
       }
       if (u.includes('/v1/chain/inscriptions')) {
         inscriptionCalls += 1;

@@ -10,7 +10,7 @@
  */
 
 import { NodeApiError } from '@/lib/api/types';
-import { readArrayBufferLimited } from '@/lib/api/bodyLimit';
+import { readArrayBufferLimited, u64ToSafeByteLimit } from '@/lib/api/bodyLimit';
 import { encodeHexLower } from '@/lib/crypto/bytes';
 import { sha256 } from '@/lib/crypto/sha256';
 import { verifyBlobId } from '@/lib/crypto/zbe';
@@ -25,7 +25,7 @@ export interface BlossomFetchOpts {
    * §7.4 advertised size ceiling from `/v1/info.max_blob_bytes`.
    * Required — never invent a default limit.
    */
-  maxBlobBytes: number;
+  maxBlobBytes: number | bigint;
 }
 
 function resolveBase(baseUrl: string | undefined): string {
@@ -51,15 +51,12 @@ export async function fetchBlossomBlob(
       `fetchBlossomBlob: blobId must be 32 bytes, got ${blobId instanceof Uint8Array ? blobId.length : typeof blobId}`,
     );
   }
-  if (
-    typeof opts.maxBlobBytes !== 'number' ||
-    !Number.isInteger(opts.maxBlobBytes) ||
-    opts.maxBlobBytes <= 0 ||
-    !Number.isSafeInteger(opts.maxBlobBytes)
-  ) {
-    throw new Error(
-      `fetchBlossomBlob: maxBlobBytes must be a positive safe integer, got ${JSON.stringify(opts.maxBlobBytes)}`,
-    );
+  let maxBlobBytes: number;
+  try {
+    maxBlobBytes = u64ToSafeByteLimit(opts.maxBlobBytes, 'fetchBlossomBlob.maxBlobBytes');
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`fetchBlossomBlob: maxBlobBytes invalid: ${detail}`);
   }
   const hex = encodeHexLower(blobId);
   const base = resolveBase(opts.baseUrl);

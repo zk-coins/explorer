@@ -275,11 +275,13 @@ export function validateCoinProofSemantics(cp: CoinProof): void {
   requireCanonicalDigest(cp.navOpening.mth, 'nav_opening.mth');
   requireCanonicalDigest(cp.detectTag, 'detect_tag');
   // coin.recipient is an address (H(Pk₀ ‖ nk_commit)), not a curve point.
-  // R' / nav_rand are opaque 32-byte secrets — width already enforced by take().
+  // nav_rand is an opaque 32-byte secret — width already enforced by take().
+  // R'_create is the x-only S2C pre-nonce point and MUST lift.
 
-  // X-only curve points on the nullifier / delivery path.
+  // X-only curve points on the nullifier / delivery / S2C path.
   requireXOnlyPoint(cp.creatingNullifier.pkCreate, 'creating_nullifier.Pk');
   requireXOnlyPoint(cp.creatingNullifier.rCreate, 'creating_nullifier.R');
+  requireXOnlyPoint(cp.creatingNullifier.rPrimeCreate, "creating_nullifier.R'");
   requireXOnlyPoint(cp.epk, 'epk');
 
   if (cp.assetTerms !== undefined) {

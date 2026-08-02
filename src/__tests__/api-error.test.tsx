@@ -60,16 +60,16 @@ describe('API failure surfaces as error state (never empty success)', () => {
             network: 'regtest',
             protocol_version: 'v1',
             finality_confirmations: 6,
-            activation_height: 0,
-            max_blob_bytes: 1_048_576,
+            activation_height: '0',
+            max_blob_bytes: '1048576',
             features: [],
           }),
         };
       }
-      // Broken accumulator: missing root
+      // Broken accumulator: missing root (u64 as canonical decimal strings)
       return {
         ok: true,
-        json: async () => ({ size: 1, tip_block_hash: 'aa'.repeat(32), tip_height: 1 }),
+        json: async () => ({ size: '1', tip_block_hash: 'aa'.repeat(32), tip_height: '1' }),
       };
     });
     vi.stubGlobal('fetch', fetchMock);

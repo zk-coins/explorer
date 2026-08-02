@@ -95,13 +95,21 @@ jobs:
         working-directory: explorer
         run: npm ci
 
+      # next.config.js loads for `next lint` and evaluates the fail-closed
+      # env-gate, so lint/typecheck need the same dummy origin the Build step
+      # uses. This is never a real node; the dedicated negative step below
+      # still proves the gate fails without it.
       - name: Lint
         working-directory: explorer
         run: npm run lint
+        env:
+          NEXT_PUBLIC_NODE_BASE_URL: https://ci-node.example.invalid
 
       - name: Typecheck
         working-directory: explorer
         run: npm run typecheck
+        env:
+          NEXT_PUBLIC_NODE_BASE_URL: https://ci-node.example.invalid
 
       - name: Test
         working-directory: explorer
