@@ -12,28 +12,47 @@ zkCoins lets you send value on Bitcoin without anyone seeing the amount, the ass
 
 ## The system, end to end
 
-| Layer | What it is | Repo |
-|---|---|---|
-| **App · Explorer** | end-user wallet (LNURL receive) · public explorer web-app | [`zk-coins/app`](https://github.com/zk-coins/app) · **[`zk-coins/explorer`](https://github.com/zk-coins/explorer)** ← this repo |
-| **SDK** | thin TypeScript client — on-device keys, signing, node/API calls | [`zk-coins/sdk`](https://github.com/zk-coins/sdk) |
-| **zkCoins API** | public REST + LNURL, hosted-wallet service (optional) | [`zk-coins/api`](https://github.com/zk-coins/api) |
-| **zkCoins node** | trustless kernel — scan · accumulator · verify · prove · store · publisher | [`zk-coins/node`](https://github.com/zk-coins/node) |
-| **bitcoind · Nostr relay** | Bitcoin L1 settlement and ordering · off-chain transport and data availability | upstream (own or external) |
+| Layer                      | What it is                                                                     | Repo                                                                                                                            |
+| -------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| **App · Explorer**         | end-user wallet · public explorer web-app                                      | [`zk-coins/app`](https://github.com/zk-coins/app) · **[`zk-coins/explorer`](https://github.com/zk-coins/explorer)** ← this repo |
+| **SDK**                    | thin TypeScript client — on-device keys, signing, node/API calls               | [`zk-coins/sdk`](https://github.com/zk-coins/sdk)                                                                               |
+| **zkCoins API**            | public REST surface (optional hosted wallet features)                          | [`zk-coins/api`](https://github.com/zk-coins/api)                                                                               |
+| **zkCoins node**           | trustless kernel — scan · accumulator · verify · prove · store · publisher     | [`zk-coins/node`](https://github.com/zk-coins/node)                                                                             |
+| **bitcoind · Nostr relay** | Bitcoin L1 settlement and ordering · off-chain transport and data availability | upstream (own or external)                                                                                                      |
 
 Supporting repos: [`zk-coins/research`](https://github.com/zk-coins/research), [`zk-coins/plonky2`](https://github.com/zk-coins/plonky2), [`zk-coins/docs`](https://github.com/zk-coins/docs).
 
 ## This repository (explorer)
 
-A **stateless presentation surface** — its own container, a sibling of the wallet [app](https://github.com/zk-coins/app). It holds no keys and no private state; everything it shows is read from a node's **public** endpoints ([specification §7.5](https://docs.zkcoins.com/specification)) and verified against Bitcoin.
+A **stateless presentation surface** — its own container, a sibling of the wallet [app](https://github.com/zk-coins/app). It holds no keys and no private state; everything it shows is read from a node's **public** endpoints ([specification §7.5](https://docs.zkcoins.com/specification)) and verified against Bitcoin. Builds as a **static export** (no server runtime, no server state).
 
 Two modes ([§5.5](https://docs.zkcoins.com/specification)):
 
-- **Public mode** — renders only Public on-chain data: the stream of `BatchInscription`s with their `prev_root → new_root` transitions and publisher identities, the global nullifier accumulator, and aggregate counts. No amounts, addresses, or parties.
-- **Authorised mode** — given a shareable per-coin view capability (`zkview`), an account view key (`zkavk`), or a balance attestation, applied **client-side**, it decrypts and renders exactly that disclosure ([§5](https://docs.zkcoins.com/specification)) and verifies the confirmation against Bitcoin.
+- **Public mode** — L1-anchor layer only: the stream of `AggregateStateNullifierV3` nullifier inscriptions with their half-aggregated `(Pkⱼ, Rⱼ)` sets and publisher identities (reveal transaction), the global nullifier accumulator folded from them by first-occurrence (`size`, `nav_root`), and aggregate counts (inscription count, transitions per block, accumulator size). §3.10 states (`pending` / `completed` / `failed`) come from the node data and are never guessed client-side. **No** amounts, `asset_id`s, balances, addresses, senders, recipients, CoinProof material, or UTXO/output graph — zkCoins is an account model.
+- **Authorised / bearer mode** — shareable fragment links (`/tx#…`, `/balance#…`, `/addr#…`) carry Bech32m secrets (`zkview`, `zkavk`, `zkatt`, `zkbid`) in the URL **fragment only** so they never reach the server. HRPs are parsed and validated client-side; decryption and verification are the next implementation block (routes currently show an honest “not yet implemented” after a successful parse).
 
-It offers **no** publisher and **no** wallet API. It MAY reuse [`@zkcoins/sdk`](https://github.com/zk-coins/sdk) as its node client.
+Navigation keeps the §5.5 two-layer boundary visible: Public (L1 anchor) vs Authorised/bearer (account layer).
 
-> **Status: scaffold.** This repo will hold the explorer frontend (`zkcoins.space`). The full design is specified in [§5 Access & Explorer](https://docs.zkcoins.com/specification) and [§6.1](https://docs.zkcoins.com/specification).
+It offers **no** publisher and **no** wallet API. It MAY reuse [`@zkcoins/sdk`](https://github.com/zk-coins/sdk) as a client where that fits.
+
+### Build configuration
+
+| Variable                    | Required             | Meaning                                                                                                                                                     |
+| --------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXT_PUBLIC_NODE_BASE_URL` | **yes** (no default) | Absolute origin of the node/API REST base the explorer reads (e.g. `https://node.example.com`). The build **fails** if it is unset or not an `http(s)` URL. |
+
+```bash
+export NEXT_PUBLIC_NODE_BASE_URL=https://node.example.com
+npm ci
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
+A build **without** `NEXT_PUBLIC_NODE_BASE_URL` must fail.
+
+> **Status:** Public mode implemented against §5.5 / §7.5 (inscription stream, accumulator, nullifier lookup, aggregate counts, fragment HRP validation). Authorised/bearer decryption and proof verification are not yet implemented.
 
 ## License
 
