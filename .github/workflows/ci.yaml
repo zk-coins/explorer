@@ -67,10 +67,16 @@ jobs:
         with:
           path: explorer
 
+      # Pin the SDK to the v1 branch that carries the exports the explorer
+      # imports (detectTag, digestToBytes, assetIdV1, …). Without a ref this
+      # checks out the SDK default branch, which predates the v1 surface and
+      # fails typecheck. Flip to the published `@zkcoins/sdk` version once it
+      # is released.
       - name: Checkout SDK (file:../sdk)
         uses: actions/checkout@v4
         with:
           repository: zk-coins/sdk
+          ref: feat/v1-cross-parity
           path: sdk
 
       # No `.nvmrc` and no `engines.node` pin in package.json. Node 22 is
