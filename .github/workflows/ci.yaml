@@ -40,9 +40,11 @@ concurrency:
 permissions:
   contents: read
 
-# Single job on GitHub-hosted Linux: lint, typecheck, test, build, and
-# the fail-closed env-gate (build without NEXT_PUBLIC_NODE_BASE_URL must
-# fail). No e2e, no coverage upload, no self-hosted runner.
+# Two jobs on GitHub-hosted Linux: lint-and-build (lint, typecheck, unit
+# test, build, and the fail-closed env-gate) then e2e-tests (full Playwright
+# suite — functional + visual — inside the pinned Playwright container so
+# committed linux baselines compare like-for-like). No coverage upload, no
+# self-hosted runner.
 #
 # No `notify-failure` job: this repository does not hold the Telegram
 # bot secrets (`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`). Add one —
@@ -143,3 +145,80 @@ jobs:
             exit 1
           fi
           echo "build failed as required (fail-closed holds)"
+
+  e2e-tests:
+    name: E2E Tests
+    needs: [lint-and-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same container as regenerate-visual-baselines.yml so the committed
+    # linux baselines compare like-for-like. Pin must move in lockstep with
+    # package.json's @playwright/test version.
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+    steps:
+      - name: Checkout explorer
+        uses: actions/checkout@v4
+        with:
+          path: explorer
+
+      - name: Checkout SDK (file:../sdk)
+        uses: actions/checkout@v4
+        with:
+          repository: zk-coins/sdk
+          ref: feat/v1-cross-parity
+          path: sdk
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            explorer/package-lock.json
+            sdk/package-lock.json
+
+      - name: Build SDK
+        working-directory: sdk
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install dependencies
+        working-directory: explorer
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: explorer
+        run: npx playwright install --with-deps chromium
+
+      # Full suite: functional + visual. Chromium carries the Visual
+      # Regression specs; firefox/webkit run the functional-only subset
+      # via playwright.config.ts's per-project grep. Compares against the
+      # committed linux baselines under e2e/*.spec.ts-snapshots/ — a real
+      # UI regression fails the PR here (this is the visual-regression-in-CI
+      # gate). NEXT_PUBLIC_NODE_BASE_URL matches the other steps in this
+      # workflow's dummy-origin convention; playwright.config.ts's own
+      # webServer.env pins the actual test origin regardless.
+      - name: Run E2E suite (functional + visual)
+        working-directory: explorer
+        run: npx playwright test
+        env:
+          NEXT_PUBLIC_NODE_BASE_URL: https://ci-node.example.invalid
+          CI: 'true'
+
+      - name: Upload playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: explorer/playwright-report/
+          retention-days: 7
+
+      - name: Upload E2E test results (diffs/traces)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: explorer/test-results/
+          retention-days: 7

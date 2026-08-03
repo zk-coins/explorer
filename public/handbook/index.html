@@ -1,0 +1,753 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>zkCoins Explorer — Handbook &amp; Visual Baselines</title>
+    <meta
+      name="description"
+      content="zkCoins Explorer handbook: every Public and bearer screen with a pixel-locked visual-regression baseline."
+    />
+    <link rel="alternate" hreflang="en" href="/handbook/" />
+    <link rel="alternate" hreflang="de" href="/handbook/de/" />
+    <link rel="alternate" hreflang="x-default" href="/handbook/" />
+    <script>
+      (function () {
+        if (sessionStorage.getItem('lang-chosen')) return;
+        var lang = null;
+        if (typeof navigator.language === 'string' && navigator.language.length > 0) {
+          lang = navigator.language.toLowerCase().slice(0, 2);
+        }
+        // else: navigator.language is absent in some embedded/automation
+        // contexts. Do not guess a language — skip the auto-redirect and
+        // keep the English default shell.
+        if (lang === 'de') {
+          sessionStorage.setItem('lang-chosen', 'de');
+          window.location.replace('/handbook/de/');
+        }
+      })();
+      function openHashTarget() {
+        var hash = location.hash;
+        if (!hash) return;
+        var el = document.querySelector(hash);
+        if (el && el.tagName === 'DETAILS') {
+          el.open = true;
+          requestAnimationFrame(function () {
+            el.scrollIntoView({ behavior: 'instant', block: 'start' });
+          });
+        }
+      }
+      window.addEventListener('hashchange', openHashTarget);
+      document.addEventListener('DOMContentLoaded', openHashTarget);
+    </script>
+    <style>
+      :root {
+        --bg: #0a0a0a;
+        --surface: #131313;
+        --surface-2: #1c1c1c;
+        --line: #2a2a2a;
+        --line-2: #353535;
+        --ink: #f5f5f5;
+        --ink-2: #c8c8c8;
+        --ink-3: #8a8a8a;
+        --ink-4: #5a5a5a;
+        --bitcoin: #f7931a;
+        --bitcoin-hover: #ffae40;
+        --ok: #4ade80;
+        --warn: #fbbf24;
+        --err: #f87171;
+        --content-width: 960px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
+          sans-serif;
+        font-size: 16px;
+        line-height: 1.65;
+        -webkit-font-smoothing: antialiased;
+      }
+      code {
+        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-size: 0.88em;
+        background: var(--surface-2);
+        padding: 2px 6px;
+        border-radius: 3px;
+        color: var(--bitcoin);
+      }
+      .wrap {
+        display: grid;
+        grid-template-columns: 280px 1fr;
+        max-width: 1320px;
+        margin: 0 auto;
+      }
+      aside {
+        position: sticky;
+        top: 0;
+        align-self: start;
+        height: 100vh;
+        overflow-y: auto;
+        padding: 32px 20px 32px 28px;
+        border-right: 1px solid var(--line);
+        background: var(--surface);
+      }
+      main {
+        padding: 56px 56px 96px;
+        max-width: var(--content-width);
+      }
+      @media (max-width: 980px) {
+        .wrap {
+          grid-template-columns: 1fr;
+        }
+        aside {
+          position: static;
+          height: auto;
+          border-right: none;
+          border-bottom: 1px solid var(--line);
+        }
+        main {
+          padding: 32px 24px 64px;
+        }
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 8px;
+      }
+      .brand .dot {
+        width: 14px;
+        height: 14px;
+        border-radius: 4px;
+        background: var(--bitcoin);
+      }
+      .brand .name {
+        font-size: 15px;
+        font-weight: 700;
+      }
+      .brand-sub {
+        font-size: 11px;
+        color: var(--ink-4);
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        margin: 0 0 18px;
+      }
+      .lang-switcher {
+        display: inline-flex;
+        gap: 1px;
+        background: var(--line);
+        padding: 1px;
+        border-radius: 4px;
+        margin: 0 0 24px;
+      }
+      .lang-switcher a {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        padding: 4px 10px;
+        color: var(--ink-3);
+        text-decoration: none;
+        border-radius: 3px;
+        background: var(--surface);
+      }
+      .lang-switcher a.active {
+        background: var(--bitcoin);
+        color: var(--bg);
+      }
+      .toc-label {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        color: var(--ink-4);
+        text-transform: uppercase;
+        margin: 18px 0 6px;
+      }
+      nav.toc ol {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      nav.toc a {
+        display: block;
+        padding: 5px 0;
+        font-size: 12.5px;
+        color: var(--ink-2);
+        text-decoration: none;
+      }
+      nav.toc a:hover {
+        color: var(--bitcoin);
+      }
+      nav.toc .spec-num {
+        color: var(--ink-4);
+        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-size: 10.5px;
+        margin-right: 8px;
+      }
+      h1 {
+        font-size: 32px;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        margin: 0 0 10px;
+      }
+      h2 {
+        font-size: 22px;
+        font-weight: 700;
+        margin: 0;
+      }
+      p {
+        margin: 0 0 14px;
+        color: var(--ink-2);
+      }
+      .lede {
+        font-size: 18px;
+        max-width: 800px;
+      }
+      a {
+        color: var(--bitcoin);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      .hero {
+        padding: 16px 0 12px;
+        border-bottom: 1px solid var(--line);
+      }
+      .meta {
+        display: flex;
+        gap: 18px;
+        font-size: 12px;
+        color: var(--ink-3);
+        flex-wrap: wrap;
+        margin-top: 14px;
+      }
+      .meta b {
+        color: var(--ink);
+      }
+      details.spec {
+        margin: 56px 0 0;
+        scroll-margin-top: 20px;
+      }
+      details.spec summary {
+        list-style: none;
+        cursor: pointer;
+        user-select: none;
+      }
+      details.spec summary::-webkit-details-marker {
+        display: none;
+      }
+      .spec-head {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 24px;
+        padding-bottom: 14px;
+        border-bottom: 2px solid var(--bitcoin);
+      }
+      .spec-head .num {
+        color: var(--bitcoin);
+        font-weight: 800;
+        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-size: 26px;
+      }
+      .spec-head .file {
+        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-size: 13px;
+        color: var(--ink-3);
+        margin-top: 6px;
+      }
+      .spec-intro {
+        max-width: 800px;
+        color: var(--ink-2);
+        font-size: 15px;
+        margin: 18px 0 0;
+      }
+      .tests {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+        gap: 22px;
+        margin: 28px 0 8px;
+      }
+      .test {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+      .test .head {
+        padding: 12px 14px 10px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .test .head .name {
+        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-size: 12px;
+        color: var(--bitcoin);
+        font-weight: 600;
+      }
+      .test .shot {
+        background: #000;
+        border-bottom: 1px solid var(--line);
+      }
+      .test .shot img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      .test .body {
+        padding: 12px 14px 14px;
+        font-size: 13px;
+        color: var(--ink-2);
+      }
+      .route {
+        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-size: 12px;
+        color: var(--ink-3);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <aside>
+        <div class="brand">
+          <span class="dot" aria-hidden="true"></span>
+          <span class="name">zkCoins Explorer</span>
+        </div>
+        <p class="brand-sub">Handbook · Visual baselines</p>
+        <div class="lang-switcher" aria-label="Language">
+          <a class="active" href="/handbook/" hreflang="en">EN</a>
+          <a href="/handbook/de/" hreflang="de">DE</a>
+        </div>
+        <p class="toc-label">Specs</p>
+        <nav class="toc" aria-label="Handbook sections">
+          <ol>
+            <li>
+              <a href="#spec-01"><span class="spec-num">01</span>Public home</a>
+            </li>
+            <li>
+              <a href="#spec-02"><span class="spec-num">02</span>Accumulator</a>
+            </li>
+            <li>
+              <a href="#spec-03"><span class="spec-num">03</span>Tx link default</a>
+            </li>
+            <li>
+              <a href="#spec-04"><span class="spec-num">04</span>Nullifier lookup</a>
+            </li>
+            <li>
+              <a href="#spec-05"><span class="spec-num">05</span>Balance link</a>
+            </li>
+            <li>
+              <a href="#spec-06"><span class="spec-num">06</span>Addr link</a>
+            </li>
+            <li>
+              <a href="#spec-07"><span class="spec-num">07</span>Authorised vs unauthorised</a>
+            </li>
+            <li>
+              <a href="#spec-08"><span class="spec-num">08</span>Error state</a>
+            </li>
+            <li>
+              <a href="#spec-09"><span class="spec-num">09</span>Loading state</a>
+            </li>
+            <li>
+              <a href="#spec-10"><span class="spec-num">10</span>Nav shell</a>
+            </li>
+          </ol>
+        </nav>
+      </aside>
+
+      <main>
+        <header class="hero">
+          <h1>Explorer handbook</h1>
+          <p class="lede">
+            Stateless presentation of the public L1-anchor layer and bearer disclosure routes. Every
+            screen below is driven by deterministic fixture data and locked by a chromium-linux
+            Playwright visual baseline.
+          </p>
+          <div class="meta">
+            <span><b>Suite</b> e2e/01–10</span>
+            <span><b>Upstream</b> mocked node origin only</span>
+            <span><b>Baselines</b> chromium · linux</span>
+          </div>
+        </header>
+
+        <details class="spec" id="spec-01" open>
+          <summary>
+            <div class="spec-head">
+              <div class="lhs">
+                <h2><span class="num">01</span> Public home</h2>
+                <p class="file">e2e/01-public-home.spec.ts · route <span class="route">/</span></p>
+              </div>
+            </div>
+          </summary>
+          <p class="spec-intro">
+            Inscription stream with aggregate counts, pagination cursor (“Load more”), empty page,
+            and mobile layout. Asserts <code>inscription-list</code>, <code>aggregate-counts</code>,
+            <code>inscription-card</code>, and <code>load-more-inscriptions</code>.
+          </p>
+          <div class="tests">
+            <article class="test">
+              <div class="head"><span class="name">01-home-desktop</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/01-home-desktop.png" alt="Public home desktop" />
+              </div>
+              <div class="body">
+                First inscriptions page with load-more affordance (desktop 1440×900).
+              </div>
+            </article>
+            <article class="test">
+              <div class="head"><span class="name">01-home-loaded-more</span></div>
+              <div class="shot">
+                <img
+                  src="/handbook/screenshots/01-home-loaded-more.png"
+                  alt="Public home after load more"
+                />
+              </div>
+              <div class="body">After load-more: second page merged, button gone.</div>
+            </article>
+            <article class="test">
+              <div class="head"><span class="name">01-home-empty</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/01-home-empty.png" alt="Public home empty" />
+              </div>
+              <div class="body">Empty inscriptions page (<code>inscriptions-empty</code>).</div>
+            </article>
+            <article class="test">
+              <div class="head"><span class="name">01-home-mobile</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/01-home-mobile.png" alt="Public home mobile" />
+              </div>
+              <div class="body">Same first page at mobile viewport (375×812).</div>
+            </article>
+          </div>
+        </details>
+
+        <details class="spec" id="spec-02">
+          <summary>
+            <div class="spec-head">
+              <div class="lhs">
+                <h2><span class="num">02</span> Accumulator</h2>
+                <p class="file">
+                  e2e/02-accumulator.spec.ts · route <span class="route">/accumulator/</span>
+                </p>
+              </div>
+            </div>
+          </summary>
+          <p class="spec-intro">
+            Nullifier accumulator view: size, nav_root, tip_height, tip_block_hash must match the
+            fixture wire values exactly.
+          </p>
+          <div class="tests">
+            <article class="test">
+              <div class="head"><span class="name">02-accumulator-desktop</span></div>
+              <div class="shot">
+                <img
+                  src="/handbook/screenshots/02-accumulator-desktop.png"
+                  alt="Accumulator desktop"
+                />
+              </div>
+              <div class="body">Fixture-backed <code>accumulator-view</code>.</div>
+            </article>
+          </div>
+        </details>
+
+        <details class="spec" id="spec-03">
+          <summary>
+            <div class="spec-head">
+              <div class="lhs">
+                <h2><span class="num">03</span> Tx link default</h2>
+                <p class="file">
+                  e2e/03-tx-link-default.spec.ts · route <span class="route">/tx/</span>
+                </p>
+              </div>
+            </div>
+          </summary>
+          <p class="spec-intro">
+            Confirmation-link shell without a valid fragment: empty grammar hint and malformed
+            fragment error. This route is <strong>not</strong> an inscription list — it is the §5.6
+            shareable confirmation panel.
+          </p>
+          <div class="tests">
+            <article class="test">
+              <div class="head"><span class="name">03-tx-empty</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/03-tx-empty.png" alt="Tx link empty fragment" />
+              </div>
+              <div class="body">
+                <code>fragment-empty</code> with <code>/tx#&lt;zkbid&gt;/&lt;zkview&gt;</code>.
+              </div>
+            </article>
+            <article class="test">
+              <div class="head"><span class="name">03-tx-malformed</span></div>
+              <div class="shot">
+                <img
+                  src="/handbook/screenshots/03-tx-malformed.png"
+                  alt="Tx link malformed fragment"
+                />
+              </div>
+              <div class="body"><code>error-state</code> for a non-bech32 fragment.</div>
+            </article>
+          </div>
+        </details>
+
+        <details class="spec" id="spec-04">
+          <summary>
+            <div class="spec-head">
+              <div class="lhs">
+                <h2><span class="num">04</span> Nullifier lookup</h2>
+                <p class="file">
+                  e2e/04-nullifier-lookup.spec.ts · route <span class="route">/nullifier/</span>
+                </p>
+              </div>
+            </div>
+          </summary>
+          <p class="spec-intro">
+            Path-B nullifier membership form: present true, present false, and client-side invalid
+            input (no network).
+          </p>
+          <div class="tests">
+            <article class="test">
+              <div class="head"><span class="name">04-nullifier-present</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/04-nullifier-present.png" alt="Nullifier present" />
+              </div>
+              <div class="body"><code>nullifier-present</code> = true with position.</div>
+            </article>
+            <article class="test">
+              <div class="head"><span class="name">04-nullifier-absent</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/04-nullifier-absent.png" alt="Nullifier absent" />
+              </div>
+              <div class="body">
+                <code>nullifier-present</code> = false (unauthenticated absence).
+              </div>
+            </article>
+            <article class="test">
+              <div class="head"><span class="name">04-nullifier-invalid-input</span></div>
+              <div class="shot">
+                <img
+                  src="/handbook/screenshots/04-nullifier-invalid-input.png"
+                  alt="Nullifier invalid input"
+                />
+              </div>
+              <div class="body">Client validation error for non-hex / wrong length.</div>
+            </article>
+          </div>
+        </details>
+
+        <details class="spec" id="spec-05">
+          <summary>
+            <div class="spec-head">
+              <div class="lhs">
+                <h2><span class="num">05</span> Balance link</h2>
+                <p class="file">
+                  e2e/05-balance-link.spec.ts · route <span class="route">/balance/</span>
+                </p>
+              </div>
+            </div>
+          </summary>
+          <p class="spec-intro">
+            §5.7 balance attestation: empty fragment grammar and authorised inline attestation with
+            subject_match / asset_match / network_id all <code>pass</code>.
+          </p>
+          <div class="tests">
+            <article class="test">
+              <div class="head"><span class="name">05-balance-empty</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/05-balance-empty.png" alt="Balance link empty" />
+              </div>
+              <div class="body"><code>fragment-empty</code> grammar for balance links.</div>
+            </article>
+            <article class="test">
+              <div class="head"><span class="name">05-balance-authorised</span></div>
+              <div class="shot">
+                <img
+                  src="/handbook/screenshots/05-balance-authorised.png"
+                  alt="Balance authorised"
+                />
+              </div>
+              <div class="body">Inline attestation with passing binding checks.</div>
+            </article>
+          </div>
+        </details>
+
+        <details class="spec" id="spec-06">
+          <summary>
+            <div class="spec-head">
+              <div class="lhs">
+                <h2><span class="num">06</span> Addr link</h2>
+                <p class="file">
+                  e2e/06-addr-link.spec.ts · route <span class="route">/addr/</span>
+                </p>
+              </div>
+            </div>
+          </summary>
+          <p class="spec-intro">
+            §5.8 address view: empty fragment, incoming-only (32 B ivk) and full (64 B ivk‖ovk)
+            modes. Without holder/relay hints the explorer shows honest
+            <code>history-not-resolvable</code> — never a fabricated empty payments list.
+          </p>
+          <div class="tests">
+            <article class="test">
+              <div class="head"><span class="name">06-addr-empty</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/06-addr-empty.png" alt="Addr link empty" />
+              </div>
+              <div class="body"><code>fragment-empty</code> grammar for addr links.</div>
+            </article>
+            <article class="test">
+              <div class="head"><span class="name">06-addr-incoming-only</span></div>
+              <div class="shot">
+                <img
+                  src="/handbook/screenshots/06-addr-incoming-only.png"
+                  alt="Addr incoming-only"
+                />
+              </div>
+              <div class="body">ivk-only mode + history-not-resolvable.</div>
+            </article>
+            <article class="test">
+              <div class="head"><span class="name">06-addr-full-mode</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/06-addr-full-mode.png" alt="Addr full mode" />
+              </div>
+              <div class="body">full (ivk ‖ ovk) mode label.</div>
+            </article>
+          </div>
+        </details>
+
+        <details class="spec" id="spec-07">
+          <summary>
+            <div class="spec-head">
+              <div class="lhs">
+                <h2><span class="num">07</span> Authorised vs unauthorised</h2>
+                <p class="file">
+                  e2e/07-bearer-authorised-vs-unauthorised.spec.ts · route
+                  <span class="route">/tx/#…</span>
+                </p>
+              </div>
+            </div>
+          </summary>
+          <p class="spec-intro">
+            Flagship contrast on the confirmation link: real ZBE open under the correct zkview
+            versus the same ciphertext opened with a wrong bearer secret (AEAD auth failure).
+          </p>
+          <div class="tests">
+            <article class="test">
+              <div class="head"><span class="name">07-tx-authorised</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/07-tx-authorised.png" alt="Tx authorised" />
+              </div>
+              <div class="body">
+                <code>confirmation-view</code> with blob_id / zbe_open / coinproof_decode all pass.
+              </div>
+            </article>
+            <article class="test">
+              <div class="head"><span class="name">07-tx-unauthorised</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/07-tx-unauthorised.png" alt="Tx unauthorised" />
+              </div>
+              <div class="body">
+                <code>error-state</code> + <code>check-zbe_open</code> fail (wrong zkview).
+              </div>
+            </article>
+          </div>
+        </details>
+
+        <details class="spec" id="spec-08">
+          <summary>
+            <div class="spec-head">
+              <div class="lhs">
+                <h2><span class="num">08</span> Error state</h2>
+                <p class="file">
+                  e2e/08-error-state.spec.ts · route <span class="route">/accumulator/</span>
+                </p>
+              </div>
+            </div>
+          </summary>
+          <p class="spec-intro">
+            Public-mode fail-closed: malformed accumulator body (missing required field) surfaces
+            <code>error-state</code> — never empty success.
+          </p>
+          <div class="tests">
+            <article class="test">
+              <div class="head"><span class="name">08-error-state</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/08-error-state.png" alt="Error state" />
+              </div>
+              <div class="body">Parse failure on accumulator fixture.</div>
+            </article>
+          </div>
+        </details>
+
+        <details class="spec" id="spec-09">
+          <summary>
+            <div class="spec-head">
+              <div class="lhs">
+                <h2><span class="num">09</span> Loading state</h2>
+                <p class="file">
+                  e2e/09-loading-state.spec.ts · route <span class="route">/accumulator/</span>
+                </p>
+              </div>
+            </div>
+          </summary>
+          <p class="spec-intro">
+            Transient <code>loading-state</code> captured while node responses are deliberately
+            delayed; then the loaded accumulator view replaces it.
+          </p>
+          <div class="tests">
+            <article class="test">
+              <div class="head"><span class="name">09-loading-state</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/09-loading-state.png" alt="Loading state" />
+              </div>
+              <div class="body">Real loading UI, not a static mock page.</div>
+            </article>
+          </div>
+        </details>
+
+        <details class="spec" id="spec-10">
+          <summary>
+            <div class="spec-head">
+              <div class="lhs">
+                <h2><span class="num">10</span> Nav shell</h2>
+                <p class="file">e2e/10-nav-shell-a11y.spec.ts · landmarks</p>
+              </div>
+            </div>
+          </summary>
+          <p class="spec-intro">
+            Shell landmarks (header, <code>nav[aria-label=&quot;Explorer modes&quot;]</code>, main,
+            footer) and both Public / Authorised nav groups at desktop and mobile.
+          </p>
+          <div class="tests">
+            <article class="test">
+              <div class="head"><span class="name">10-nav-shell-desktop</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/10-nav-shell-desktop.png" alt="Nav shell desktop" />
+              </div>
+              <div class="body">Desktop chrome on the home route.</div>
+            </article>
+            <article class="test">
+              <div class="head"><span class="name">10-nav-shell-mobile</span></div>
+              <div class="shot">
+                <img src="/handbook/screenshots/10-nav-shell-mobile.png" alt="Nav shell mobile" />
+              </div>
+              <div class="body">Mobile chrome on the home route.</div>
+            </article>
+          </div>
+        </details>
+      </main>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>zkCoins Explorer — Handbuch</title>
+    <meta
+      name="description"
+      content="zkCoins Explorer Handbuch: Öffentliche und Bearer-Screens mit Visual-Regression-Baselines."
+    />
+    <link rel="alternate" hreflang="en" href="/handbook/" />
+    <link rel="alternate" hreflang="de" href="/handbook/de/" />
+    <link rel="alternate" hreflang="x-default" href="/handbook/" />
+    <style>
+      :root {
+        --bg: #0a0a0a;
+        --surface: #131313;
+        --line: #2a2a2a;
+        --ink: #f5f5f5;
+        --ink-2: #c8c8c8;
+        --ink-3: #8a8a8a;
+        --ink-4: #5a5a5a;
+        --bitcoin: #f7931a;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
+          sans-serif;
+        font-size: 16px;
+        line-height: 1.65;
+      }
+      .wrap {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 48px 24px 80px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 8px;
+      }
+      .brand .dot {
+        width: 14px;
+        height: 14px;
+        border-radius: 4px;
+        background: var(--bitcoin);
+      }
+      .brand .name {
+        font-size: 15px;
+        font-weight: 700;
+      }
+      .brand-sub {
+        font-size: 11px;
+        color: var(--ink-4);
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        margin: 0 0 18px;
+      }
+      .lang-switcher {
+        display: inline-flex;
+        gap: 1px;
+        background: var(--line);
+        padding: 1px;
+        border-radius: 4px;
+        margin: 0 0 32px;
+      }
+      .lang-switcher a {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        padding: 4px 10px;
+        color: var(--ink-3);
+        text-decoration: none;
+        border-radius: 3px;
+        background: var(--surface);
+      }
+      .lang-switcher a.active {
+        background: var(--bitcoin);
+        color: var(--bg);
+      }
+      h1 {
+        font-size: 28px;
+        font-weight: 800;
+        margin: 0 0 12px;
+      }
+      p {
+        color: var(--ink-2);
+        margin: 0 0 14px;
+      }
+      a {
+        color: var(--bitcoin);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      ol {
+        color: var(--ink-2);
+        padding-left: 22px;
+      }
+      li {
+        margin: 8px 0;
+      }
+      .note {
+        margin-top: 28px;
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        font-size: 14px;
+        color: var(--ink-3);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="brand">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="name">zkCoins Explorer</span>
+      </div>
+      <p class="brand-sub">Handbuch · Visual Baselines</p>
+      <div class="lang-switcher" aria-label="Sprache">
+        <a href="/handbook/" hreflang="en">EN</a>
+        <a class="active" href="/handbook/de/" hreflang="de">DE</a>
+      </div>
+
+      <h1>Explorer-Handbuch</h1>
+      <p>
+        Zustandslose Darstellung der öffentlichen L1-Anker-Schicht und der Bearer-Routen. Jeder
+        Screen der englischen Vollversion ist mit einer chromium-linux Playwright-Baseline
+        abgesichert.
+      </p>
+      <p>
+        Die vollständigen Screenshot-Sektionen (01–10) liegen in der englischen Ausgabe. Diese
+        deutsche Hülle verlinkt dorthin und erklärt den Aufbau.
+      </p>
+
+      <ol>
+        <li><a href="/handbook/#spec-01">01 · Public Home (Inschriften-Stream)</a></li>
+        <li><a href="/handbook/#spec-02">02 · Accumulator</a></li>
+        <li><a href="/handbook/#spec-03">03 · Tx-Link (Confirmation, leer / malformed)</a></li>
+        <li><a href="/handbook/#spec-04">04 · Nullifier-Lookup</a></li>
+        <li><a href="/handbook/#spec-05">05 · Balance-Link</a></li>
+        <li><a href="/handbook/#spec-06">06 · Addr-Link</a></li>
+        <li><a href="/handbook/#spec-07">07 · Authorised vs. Unauthorised</a></li>
+        <li><a href="/handbook/#spec-08">08 · Error State</a></li>
+        <li><a href="/handbook/#spec-09">09 · Loading State</a></li>
+        <li><a href="/handbook/#spec-10">10 · Nav / Shell</a></li>
+      </ol>
+
+      <p class="note">
+        Screenshots und ausführliche Beschreibungen: siehe
+        <a href="/handbook/">englische Handbook-Ausgabe</a>. Baselines werden von
+        <code>e2e/*.spec.ts-snapshots/</code> nach <code>/handbook/screenshots/</code>
+        synchronisiert.
+      </p>
+    </div>
+  </body>
+</html>
