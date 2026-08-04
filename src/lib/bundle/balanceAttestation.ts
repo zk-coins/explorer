@@ -65,6 +65,10 @@ export function deserializeBalanceAttestationV1(bytes: Uint8Array): BalanceAttes
   }
   let o = 0;
   const take = (n: number, ctx: string): Uint8Array => {
+    /* v8 ignore next 3 -- take() here is only ever called for the 11 fixed
+       288-byte-total prefix fields; the entry guard above already requires
+       bytes.length >= 292, so o+n can never exceed bytes.length at these
+       call sites */
     if (o + n > bytes.length) {
       throw new BalanceAttestationError(`${ctx}: truncated`);
     }
@@ -85,6 +89,7 @@ export function deserializeBalanceAttestationV1(bytes: Uint8Array): BalanceAttes
   const rAnchor = take(32, 'R_anchor');
   const networkId = take(32, 'network_id');
 
+  /* v8 ignore next 3 -- prefix length gate above already requires ≥4 remaining bytes for the proof length */
   if (o + 4 > bytes.length) {
     throw new BalanceAttestationError('missing proof length prefix');
   }
@@ -119,6 +124,7 @@ export function deserializeBalanceAttestationV1(bytes: Uint8Array): BalanceAttes
 
 /** Build a canonical attestation body for tests/fixtures. */
 export function serializeBalanceAttestationV1(att: BalanceAttestationV1): Uint8Array {
+  /* v8 ignore next 3 -- a >4 GiB proof array is not constructible in a test process */
   if (att.proof.length > 0xffffffff) {
     throw new BalanceAttestationError('proof exceeds u32 length');
   }
@@ -139,6 +145,7 @@ export function serializeBalanceAttestationV1(att: BalanceAttestationV1): Uint8A
   ];
   let total = 0;
   for (const p of parts) {
+    /* v8 ignore next 3 -- fixed-width fields never empty; empty proof is the only zero-length part */
     if (p.length === 0 && p !== att.proof) {
       // empty proof is allowed; other fields must be present via fixed widths above
     }

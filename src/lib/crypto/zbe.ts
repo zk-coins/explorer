@@ -65,6 +65,7 @@ function chunkCount(plaintextLen: number): number {
     return 1;
   }
   const n = Math.ceil(plaintextLen / ZBE_CHUNK);
+  /* v8 ignore next 3 -- a plaintext needing >u32 chunks is not constructible in-process */
   if (n > 0xffffffff) {
     throw new ZbeError('too_many_chunks', `ZBE plaintext requires ${n} chunks (exceeds u32::MAX)`);
   }
@@ -242,6 +243,7 @@ export function verifyBlobId(ciphertext: Uint8Array, expectedBlobId: Uint8Array)
     throw new Error(`verifyBlobId: expectedBlobId must be 32 bytes, got ${expectedBlobId.length}`);
   }
   const actual = sha256(ciphertext);
+  /* v8 ignore next 3 -- SHA-256 always returns 32 bytes; this guard is defensive only */
   if (actual.length !== 32) {
     throw new Error('verifyBlobId: SHA-256 produced non-32-byte digest');
   }

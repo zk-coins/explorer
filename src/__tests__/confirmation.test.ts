@@ -14,7 +14,7 @@ import { stateFromInscriptions } from '@/lib/bearer/stateFromNode';
 import { encodeHexLower } from '@/lib/crypto/bytes';
 import { zbeSeal } from '@/lib/crypto/zbe';
 import type { TxFragmentOk } from '@/lib/fragments';
-import { fill, sampleCoinProof, xOnlyFromSeed } from './fixtures/crypto';
+import { digestLabel, fill, sampleCoinProof, xOnlyFromSeed } from './fixtures/crypto';
 
 describe('§5.6 confirmation open', () => {
   it('opens a sealed CoinProof and exposes coin fields', () => {
@@ -289,5 +289,377 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
     expect(view.state).toBeUndefined();
     expect(view.checks.find((c) => c.id === 'state_310')?.status).toBe('open');
     expect(view.checks.find((c) => c.id === 'nullifier_r_match')?.status).toBe('fail');
+  });
+
+  it('parseHolderHint via resolveConfirmationLink holders path + full success state', async () => {
+    const kTx = fill(32, 0x51);
+    const { assetIdV1, digestToBytes, GENESIS_TAG } = await import('@zkcoins/sdk');
+    const { sha256 } = await import('@/lib/crypto/sha256');
+    const creator = xOnlyFromSeed(30);
+    const name = new TextEncoder().encode('DemoAsset');
+    const nameHash = sha256(name);
+    const assetId = digestToBytes(assetIdV1(GENESIS_TAG, creator, nameHash, 2, 1));
+    const cp = sampleCoinProof(20, {
+      coin: {
+        identifier: digestLabel('id/conf-full'),
+        recipient: digestLabel('r/conf-full'),
+        amount: 3n,
+        assetId,
+      },
+      assetTerms: {
+        creatorPubkey: creator,
+        decimals: 2,
+        issuanceVersion: 1,
+        name,
+      },
+    });
+    const plain = serializeCoinProof(cp);
+    const { ciphertext, blobId } = zbeSeal(kTx, plain);
+    const pkHex = encodeHexLower(cp.creatingNullifier.pkCreate);
+    const rHex = encodeHexLower(cp.creatingNullifier.rCreate);
+
+    const view = await resolveConfirmationLink(
+      {
+        status: 'ok',
+        kind: 'tx',
+        bundle: blobId,
+        view: kTx,
+        holderHint: '@https://holder.example',
+      },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlobFromHolders: async () => ({ body: ciphertext, holder: 'https://holder.example' }),
+        fetchNullifier: async () => ({
+          present: true,
+          position: 2n,
+          leaf: rHex,
+          audit_path: [],
+          tree_size: 3n,
+          root: 'aa'.repeat(32),
+          tip_block_hash: 'bb'.repeat(32),
+          tip_height: 200n,
+        }),
+        fetchInscriptions: async () => ({
+          inscriptions: [
+            {
+              txid: 'ee'.repeat(32),
+              height: 150n,
+              tx_index: 0,
+              vin_index: 0,
+              count: 1,
+              format: 1,
+              confirmation_state: 'completed',
+              nullifiers: [{ pubkey: pkHex, r: rHex, state: 'completed' }],
+            },
+          ],
+        }),
+      },
+    );
+
+    expect(view.checks.find((c) => c.id === 'fetch_blob')?.status).toBe('pass');
+    expect(view.checks.find((c) => c.id === 'nullifier_path_b')?.status).toBe('pass');
+    expect(view.checks.find((c) => c.id === 'nullifier_r_match')?.status).toBe('pass');
+    expect(view.checks.find((c) => c.id === 'state_310')?.status).toBe('pass');
+    expect(view.state).toBe('completed');
+    expect(view.anchoring?.revealTxid).toBe('ee'.repeat(32));
+    expect(view.anchoring?.confirmations).toBe(200n - 150n + 1n);
+    expect(view.assetTermsName).toBe('DemoAsset');
+  });
+
+  it('holderHint comma-list, bare http, op: and empty parse via holders empty path', async () => {
+    const kTx = fill(32, 0x52);
+    const cp = sampleCoinProof(21);
+    const plain = serializeCoinProof(cp);
+    const { ciphertext, blobId } = zbeSeal(kTx, plain);
+
+    // Comma-separated holders.
+    const v1 = await resolveConfirmationLink(
+      {
+        status: 'ok',
+        kind: 'tx',
+        bundle: blobId,
+        view: kTx,
+        holderHint: 'https://a.example, not-a-url, https://b.example',
+      },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlobFromHolders: async (_id, holders) => {
+          expect(holders).toEqual(['https://a.example', 'https://b.example']);
+          return { body: ciphertext, holder: holders[0]! };
+        },
+        fetchNullifier: async () => {
+          throw new Error('nf boom');
+        },
+        fetchInscriptions: async () => {
+          throw new Error('insc boom');
+        },
+      },
+    );
+    expect(v1.checks.find((c) => c.id === 'nullifier_path_b')?.status).toBe('fail');
+    expect(v1.checks.find((c) => c.id === 'state_310')?.status).toBe('open');
+
+    // Bare https without @.
+    const v2 = await resolveConfirmationLink(
+      {
+        status: 'ok',
+        kind: 'tx',
+        bundle: blobId,
+        view: kTx,
+        holderHint: 'https://solo.example',
+      },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlobFromHolders: async () => ({ body: ciphertext, holder: 'https://solo.example' }),
+        fetchNullifier: async () => ({
+          present: false,
+          audit_path: [],
+          tree_size: 0n,
+          root: 'aa'.repeat(32),
+          tip_block_hash: 'bb'.repeat(32),
+          tip_height: 1n,
+        }),
+        fetchInscriptions: async () => ({ inscriptions: [] }),
+      },
+    );
+    expect(v2.checks.find((c) => c.id === 'fetch_blob')?.status).toBe('pass');
+
+    // op: prefix and @non-http → no holders → node path.
+    const v3 = await resolveConfirmationLink(
+      {
+        status: 'ok',
+        kind: 'tx',
+        bundle: blobId,
+        view: kTx,
+        holderHint: 'op:pkhex',
+      },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlob: async () => ciphertext,
+        fetchNullifier: async () => ({
+          present: false,
+          audit_path: [],
+          tree_size: 0n,
+          root: 'aa'.repeat(32),
+          tip_block_hash: 'bb'.repeat(32),
+          tip_height: 1n,
+        }),
+        fetchInscriptions: async () => ({ inscriptions: [] }),
+      },
+    );
+    expect(v3.checks.find((c) => c.id === 'fetch_blob')?.detail).toMatch(/node Blossom/);
+  });
+
+  it('openConfirmationBlob ZbeError with chunkIndex path', () => {
+    const kTx = fill(32, 0x53);
+    const { ciphertext, blobId } = zbeSeal(kTx, new TextEncoder().encode('x'));
+    // Wrong key: blob_id still matches, zbe fails with auth_failed + chunkIndex.
+    const wrongKey = fill(32, 0x99);
+    const opened2 = openConfirmationBlob(wrongKey, ciphertext, blobId);
+    expect(opened2.checks.find((c) => c.id === 'zbe_open')?.status).toBe('fail');
+    expect(opened2.fatalError).toMatch(/auth_failed/);
+    expect(opened2.fatalError).toMatch(/chunk/);
+  });
+
+  it('@-prefixed non-http holderHint falls through to empty list (node Blossom path)', async () => {
+    const kTx = fill(32, 0x56);
+    const plain = serializeCoinProof(sampleCoinProof(24));
+    const { ciphertext, blobId } = zbeSeal(kTx, plain);
+    const view = await resolveConfirmationLink(
+      {
+        status: 'ok',
+        kind: 'tx',
+        bundle: blobId,
+        view: kTx,
+        holderHint: '@ftp://not-http.example',
+      },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlob: async () => ciphertext,
+        fetchNullifier: async () => ({
+          present: false,
+          audit_path: [],
+          tree_size: 0n,
+          root: 'aa'.repeat(32),
+          tip_block_hash: 'bb'.repeat(32),
+          tip_height: 1n,
+        }),
+        fetchInscriptions: async () => ({ inscriptions: [] }),
+      },
+    );
+    expect(view.checks.find((c) => c.id === 'fetch_blob')?.detail).toMatch(
+      /Fetched from node Blossom base/,
+    );
+    expect(view.checks.find((c) => c.id === 'fetch_blob')?.detail).not.toMatch(
+      /Fetched from holder/,
+    );
+  });
+
+  it('resolveConfirmationLink early-returns when openConfirmationBlob fails', async () => {
+    const sealKey = fill(32, 0x57);
+    const wrongKey = fill(32, 0x58);
+    const plain = serializeCoinProof(sampleCoinProof(25));
+    const { ciphertext, blobId } = zbeSeal(sealKey, plain);
+    const view = await resolveConfirmationLink(
+      {
+        status: 'ok',
+        kind: 'tx',
+        bundle: blobId,
+        view: wrongKey,
+      },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlob: async () => ciphertext,
+      },
+    );
+    expect(view.fatalError).toBeDefined();
+    expect(view.coin).toBeUndefined();
+    expect(view.state).toBeUndefined();
+    expect(view.checks.find((c) => c.id === 'zbe_open')?.status).toBe('fail');
+  });
+
+  it('resolveConfirmationLink info failure and blob fetch failure', async () => {
+    const kTx = fill(32, 0x55);
+    const { ciphertext, blobId } = zbeSeal(kTx, serializeCoinProof(sampleCoinProof(23)));
+    const infoFail = await resolveConfirmationLink(
+      { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
+      {
+        fetchInfo: async () => {
+          throw new Error('no info');
+        },
+      },
+    );
+    expect(infoFail.fatalError).toMatch(/no info/);
+
+    const blobFail = await resolveConfirmationLink(
+      { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlob: async () => {
+          throw new Error('blob gone');
+        },
+      },
+    );
+    expect(blobFail.fatalError).toMatch(/blob gone/);
+    void ciphertext;
+  });
+
+  it('invalid UTF-8 assetTerms name is omitted', async () => {
+    const kTx = fill(32, 0x54);
+    const { assetIdV1, digestToBytes, GENESIS_TAG } = await import('@zkcoins/sdk');
+    const { sha256 } = await import('@/lib/crypto/sha256');
+    const creator = xOnlyFromSeed(31);
+    const name = new Uint8Array([0x80]); // invalid UTF-8
+    const nameHash = sha256(name);
+    const assetId = digestToBytes(assetIdV1(GENESIS_TAG, creator, nameHash, 2, 1));
+    const cp = sampleCoinProof(22, {
+      coin: {
+        identifier: digestLabel('id/utf8'),
+        recipient: digestLabel('r/utf8'),
+        amount: 1n,
+        assetId,
+      },
+      assetTerms: {
+        creatorPubkey: creator,
+        decimals: 2,
+        issuanceVersion: 1,
+        name,
+      },
+    });
+    const plain = serializeCoinProof(cp);
+    const { ciphertext, blobId } = zbeSeal(kTx, plain);
+    const view = await resolveConfirmationLink(
+      { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlob: async () => ciphertext,
+        fetchNullifier: async () => ({
+          present: false,
+          audit_path: [],
+          tree_size: 0n,
+          root: 'aa'.repeat(32),
+          tip_block_hash: 'bb'.repeat(32),
+          tip_height: 1n,
+        }),
+        fetchInscriptions: async () => ({ inscriptions: [] }),
+      },
+    );
+    expect(view.assetTermsName).toBeUndefined();
+  });
+
+  it('findCreatingPkInInscriptions exhausts maxPages without hit', async () => {
+    let calls = 0;
+    const { pagesScanned, hit } = await findCreatingPkInInscriptions(
+      'aa'.repeat(32),
+      'bb'.repeat(32),
+      async () => {
+        calls += 1;
+        return {
+          inscriptions: [],
+          next_height: BigInt(calls),
+          next_tx_index: 0,
+          next_vin_index: 0,
+        };
+      },
+      { maxPages: 3 },
+    );
+    expect(pagesScanned).toBe(3);
+    expect(hit).toBeUndefined();
+    expect(calls).toBe(3);
   });
 });

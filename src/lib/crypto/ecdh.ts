@@ -58,6 +58,7 @@ export function ecdhSharedX(scalar: Uint8Array, peerXonly: Uint8Array): Uint8Arr
     throw new EcdhError(`peer x-only is not a valid curve point: ${msg}`);
   }
 
+  /* v8 ignore next 6 -- multiply fails only if lift_x returned a non-multipliable point, which noble does not expose for valid lifts */
   try {
     const shared = peer.multiply(d);
     // Compressed SEC1 is 0x02/0x03 ‖ x; x-only is the x coordinate alone.

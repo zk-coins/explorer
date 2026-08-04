@@ -1,12 +1,21 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, afterEach } from 'vitest';
 import { encodeBech32m, EXPLORER_HRPS } from '@/lib/bech32m';
-import { parseAddrFragment, parseBalanceFragment, parseTxFragment } from '@/lib/fragments';
+import {
+  parseAddrFragment,
+  parseBalanceFragment,
+  parseTxFragment,
+  readLocationHash,
+} from '@/lib/fragments';
 
 function p(n: number, fill: number): Uint8Array {
   return Uint8Array.from({ length: n }, () => fill);
 }
 
 describe('fragment parsing', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('parses a valid tx fragment (zkbid/zkview)', () => {
     const bundle = encodeBech32m(EXPLORER_HRPS.zkbid, p(32, 1));
     const view = encodeBech32m(EXPLORER_HRPS.zkview, p(32, 2));
@@ -18,11 +27,38 @@ describe('fragment parsing', () => {
     }
   });
 
+  it('parses tx fragment with holder hint', () => {
+    const bundle = encodeBech32m(EXPLORER_HRPS.zkbid, p(32, 1));
+    const view = encodeBech32m(EXPLORER_HRPS.zkview, p(32, 2));
+    const result = parseTxFragment(
+      `#${bundle}/${view};h=${encodeURIComponent('https://h.example')}`,
+    );
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.holderHint).toBe('https://h.example');
+    }
+  });
+
+  it('rejects empty and invalid holder hint encoding', () => {
+    const bundle = encodeBech32m(EXPLORER_HRPS.zkbid, p(32, 1));
+    const view = encodeBech32m(EXPLORER_HRPS.zkview, p(32, 2));
+    expect(parseTxFragment(`#${bundle}/${view};h=`).status).toBe('error');
+    // Lone % is invalid percent-encoding.
+    expect(parseTxFragment(`#${bundle}/${view};h=%`).status).toBe('error');
+  });
+
   it('rejects swapped HRPs on tx fragment', () => {
     const wrongBundle = encodeBech32m(EXPLORER_HRPS.zkview, p(32, 1));
     const wrongView = encodeBech32m(EXPLORER_HRPS.zkbid, p(32, 2));
     const result = parseTxFragment(`#${wrongBundle}/${wrongView}`);
     expect(result.status).toBe('error');
+  });
+
+  it('rejects wrong part count and empty parts on tx', () => {
+    expect(parseTxFragment('#onlyone').status).toBe('error');
+    expect(parseTxFragment('#a/b/c').status).toBe('error');
+    expect(parseTxFragment('#/viewonly').status).toBe('error');
+    expect(parseTxFragment('#bundleonly/').status).toBe('error');
   });
 
   it('parses a valid addr fragment (zk/zkavk 64 B → full mode)', () => {
@@ -35,21 +71,26 @@ describe('fragment parsing', () => {
     }
   });
 
-  it('parses zkavk 32 B → incoming-only mode', () => {
+  it('parses zkavk 32 B → incoming-only mode with holder hint', () => {
     const address = encodeBech32m(EXPLORER_HRPS.zk, p(32, 3));
     const avk = encodeBech32m(EXPLORER_HRPS.zkavk, p(32, 4));
-    const result = parseAddrFragment(`#${address}/${avk}`);
+    const result = parseAddrFragment(
+      `#${address}/${avk};h=${encodeURIComponent('https://relay.example')}`,
+    );
     expect(result.status).toBe('ok');
     if (result.status === 'ok') {
       expect(result.avkByteLength).toBe(32);
+      expect(result.holderHint).toBe('https://relay.example');
     }
   });
 
-  it('rejects wrong HRP on addr fragment', () => {
+  it('rejects wrong HRP and part counts on addr fragment', () => {
     const address = encodeBech32m(EXPLORER_HRPS.zk, p(32, 3));
     const notAvk = encodeBech32m(EXPLORER_HRPS.zkview, p(32, 4));
-    const result = parseAddrFragment(`#${address}/${notAvk}`);
-    expect(result.status).toBe('error');
+    expect(parseAddrFragment(`#${address}/${notAvk}`).status).toBe('error');
+    expect(parseAddrFragment('#only').status).toBe('error');
+    expect(parseAddrFragment('#/').status).toBe('error');
+    expect(parseAddrFragment('').status).toBe('empty');
   });
 
   it('parses a valid balance fragment with zkatt handle', () => {
@@ -63,6 +104,20 @@ describe('fragment parsing', () => {
     }
   });
 
+  it('parses balance inline form and holder hint', () => {
+    const address = encodeBech32m(EXPLORER_HRPS.zk, p(32, 5));
+    const assetId = 'cd'.repeat(32);
+    const result = parseBalanceFragment(
+      `#${address}/${assetId}/i:YWJj;h=${encodeURIComponent('https://h.example,https://h2.example')}`,
+    );
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.attestationForm).toBe('inline');
+      expect(result.attestationInline).toBe('YWJj');
+      expect(result.holderHint).toBe('https://h.example,https://h2.example');
+    }
+  });
+
   it('rejects wrong HRP for zkatt handle', () => {
     const address = encodeBech32m(EXPLORER_HRPS.zk, p(32, 5));
     const assetId = 'ab'.repeat(32);
@@ -71,8 +126,34 @@ describe('fragment parsing', () => {
     expect(result.status).toBe('error');
   });
 
+  it('rejects balance wrong part count, empty parts, bad asset_id, empty h:/i:', () => {
+    const address = encodeBech32m(EXPLORER_HRPS.zk, p(32, 5));
+    const assetId = 'ab'.repeat(32);
+    const att = encodeBech32m(EXPLORER_HRPS.zkatt, p(32, 6));
+    expect(parseBalanceFragment(`#${address}/${assetId}`).status).toBe('error');
+    expect(parseBalanceFragment(`#${address}//h:${att}`).status).toBe('error');
+    expect(parseBalanceFragment(`#${address}/NOTHEX/h:${att}`).status).toBe('error');
+    expect(parseBalanceFragment(`#${address}/${assetId}/h:`).status).toBe('error');
+    expect(parseBalanceFragment(`#${address}/${assetId}/i:`).status).toBe('error');
+    expect(parseBalanceFragment(`#${address}/${assetId}/neither`).status).toBe('error');
+    // Bare bech32 without h:/i: discriminator.
+    expect(parseBalanceFragment(`#${address}/${assetId}/${att}`).status).toBe('error');
+    expect(parseBalanceFragment('').status).toBe('empty');
+    expect(parseBalanceFragment('#').status).toBe('empty');
+  });
+
   it('returns empty when fragment is missing', () => {
     expect(parseTxFragment('').status).toBe('empty');
     expect(parseTxFragment('#').status).toBe('empty');
+  });
+
+  it('readLocationHash returns window hash and empty when window is undefined', () => {
+    const original = window.location.hash;
+    window.location.hash = '#test-fragment';
+    expect(readLocationHash()).toBe('#test-fragment');
+    window.location.hash = original;
+
+    vi.stubGlobal('window', undefined);
+    expect(readLocationHash()).toBe('');
   });
 });

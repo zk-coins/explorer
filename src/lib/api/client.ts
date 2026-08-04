@@ -158,6 +158,9 @@ function requireU64(obj: Record<string, unknown>, key: string, ctx: string): big
     );
   }
   let n: bigint;
+  /* v8 ignore next 9 -- v already matched U64_CANONICAL_RE, a pure
+     decimal-digit sequence; BigInt() is arbitrary-precision and cannot
+     throw on such input */
   try {
     n = BigInt(v);
   } catch {

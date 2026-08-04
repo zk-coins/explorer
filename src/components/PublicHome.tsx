@@ -104,6 +104,7 @@ export function PublicHome() {
 
   const loadMore = useCallback(async () => {
     if (data === null || data.cursor === null || loadingMore) {
+      /* v8 ignore next -- the `data.cursor === null` disjunct is unreachable — the load-more control only renders while cursor !== null, and any concurrent loadMore short-circuits on `loadingMore` (still true, cursor still the old non-null value) before the cursor check; a click on the unmounted button cannot re-enter React's handler */
       return;
     }
     setLoadingMore(true);
@@ -153,6 +154,10 @@ export function PublicHome() {
   if (error !== null && data === null) {
     return <ErrorState title="Failed to load public data" message={error} />;
   }
+  /* v8 ignore next 3 -- loadInitial's success path sets data non-null in
+     the same batched update as loading=false; its failure path sets
+     error non-null too, caught by the error!==null&&data===null check
+     above first */
   if (data === null) {
     return <ErrorState title="Failed to load public data" message="No data returned" />;
   }

@@ -4,11 +4,13 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  BalanceAttestationError,
+  deserializeBalanceAttestationV1,
   serializeBalanceAttestationV1,
   type BalanceAttestationV1,
 } from '@/lib/bundle/balanceAttestation';
 import { resolveBalanceAttestation, verifyBalanceAttestationBytes } from '@/lib/bearer/balance';
-import { base64UrlEncodeNoPad, encodeHexLower } from '@/lib/crypto/bytes';
+import { base64UrlEncodeNoPad, encodeHexLower, writeU32Be } from '@/lib/crypto/bytes';
 import { sha256 } from '@/lib/crypto/sha256';
 import type { BalanceFragmentOk } from '@/lib/fragments';
 import { digestToBytes, networkIdRegtest } from '@zkcoins/sdk';
@@ -143,5 +145,267 @@ describe('§5.7 balance attestation', () => {
     } finally {
       globalThis.atob = originalAtob;
     }
+  });
+
+  it('deserializeBalanceAttestationV1 rejects non-bytes, short, bad proof len, trailing', () => {
+    expect(() => deserializeBalanceAttestationV1('x' as unknown as Uint8Array)).toThrow(
+      BalanceAttestationError,
+    );
+    expect(() => deserializeBalanceAttestationV1(new Uint8Array(10))).toThrow(/too short/);
+    const att = sampleAttestation();
+    const body = serializeBalanceAttestationV1(att);
+    // proof length prefix at offset 288; set to huge value.
+    const badLen = body.slice();
+    badLen.set(writeU32Be(0xffff_ffff), 288);
+    expect(() => deserializeBalanceAttestationV1(badLen)).toThrow(/exceeds remaining/);
+    const trailing = new Uint8Array(body.length + 1);
+    trailing.set(body);
+    expect(() => deserializeBalanceAttestationV1(trailing)).toThrow(/trailing bytes/);
+  });
+
+  it('fails asset_match on mismatch', () => {
+    const att = sampleAttestation();
+    const body = serializeBalanceAttestationV1(att);
+    const frag = fragmentFor(att);
+    frag.assetIdHex = 'ff'.repeat(32);
+    const view = verifyBalanceAttestationBytes(body, frag, { network: 'regtest' });
+    expect(view.checks.find((c) => c.id === 'asset_match')?.status).toBe('fail');
+  });
+
+  it('network_id mismatch and pure helper without network', () => {
+    const att = sampleAttestation();
+    const body = serializeBalanceAttestationV1(att);
+    const frag = fragmentFor(att);
+    const mismatch = verifyBalanceAttestationBytes(body, frag, { network: 'mainnet' });
+    expect(mismatch.checks.find((c) => c.id === 'network_id')?.status).toBe('fail');
+    const openNet = verifyBalanceAttestationBytes(body, frag);
+    expect(openNet.checks.find((c) => c.id === 'network_id')?.status).toBe('open');
+  });
+
+  it('serializes empty proof', () => {
+    const att = sampleAttestation();
+    att.proof = new Uint8Array(0);
+    const body = serializeBalanceAttestationV1(att);
+    const again = deserializeBalanceAttestationV1(body);
+    expect(again.proof.length).toBe(0);
+  });
+
+  it('decode-throws branch on verifyBalanceAttestationBytes', () => {
+    const att = sampleAttestation();
+    const frag = fragmentFor(att);
+    const view = verifyBalanceAttestationBytes(new Uint8Array(8), frag, { network: 'regtest' });
+    expect(view.checks.find((c) => c.id === 'decode')?.status).toBe('fail');
+    expect(view.fatalError).toBeDefined();
+  });
+
+  it('resolveBalanceAttestation skips info when network+maxBlobBytes supplied', async () => {
+    const att = sampleAttestation();
+    const frag = fragmentFor(att);
+    let infoCalls = 0;
+    const view = await resolveBalanceAttestation(frag, {
+      network: 'regtest',
+      maxBlobBytes: 1_000_000,
+      fetchInfo: async () => {
+        infoCalls += 1;
+        throw new Error('should not call');
+      },
+      fetchNullifier: async () => ({
+        present: true,
+        position: 1n,
+        leaf: 'aa'.repeat(32),
+        audit_path: [],
+        tree_size: 1n,
+        root: 'bb'.repeat(32),
+        tip_block_hash: 'cc'.repeat(32),
+        tip_height: 10n,
+      }),
+    });
+    expect(infoCalls).toBe(0);
+    expect(view.fields?.balance).toBe('9000');
+    expect(view.checks.find((c) => c.id === 'anchor_path_b')?.status).toBe('pass');
+  });
+
+  it('fetchInfo fills only the missing of network / maxBlobBytes', async () => {
+    const att = sampleAttestation();
+    const frag = fragmentFor(att);
+    const info = {
+      network: 'regtest' as const,
+      protocol_version: 'v1',
+      finality_confirmations: 6,
+      activation_height: 0n,
+      max_blob_bytes: 1_000_000n,
+      features: [] as string[],
+    };
+
+    // (a) network supplied, maxBlobBytes sourced from fetchInfo.
+    const onlyNetwork = await resolveBalanceAttestation(frag, {
+      network: 'regtest',
+      fetchInfo: async () => info,
+      fetchNullifier: async () => ({
+        present: true,
+        position: 1n,
+        leaf: 'aa'.repeat(32),
+        audit_path: [],
+        tree_size: 1n,
+        root: 'bb'.repeat(32),
+        tip_block_hash: 'cc'.repeat(32),
+        tip_height: 10n,
+      }),
+    });
+    expect(onlyNetwork.fatalError).toBeUndefined();
+    expect(onlyNetwork.fields?.balance).toBe('9000');
+    expect(onlyNetwork.checks.find((c) => c.id === 'network_id')?.status).toBe('pass');
+
+    // (b) maxBlobBytes supplied, network sourced from fetchInfo.
+    const onlyMax = await resolveBalanceAttestation(frag, {
+      maxBlobBytes: 1_000_000n,
+      fetchInfo: async () => info,
+      fetchNullifier: async () => ({
+        present: true,
+        position: 1n,
+        leaf: 'aa'.repeat(32),
+        audit_path: [],
+        tree_size: 1n,
+        root: 'bb'.repeat(32),
+        tip_block_hash: 'cc'.repeat(32),
+        tip_height: 10n,
+      }),
+    });
+    expect(onlyMax.fatalError).toBeUndefined();
+    expect(onlyMax.fields?.balance).toBe('9000');
+    expect(onlyMax.checks.find((c) => c.id === 'network_id')?.status).toBe('pass');
+  });
+
+  it('Path-B probe present:false and lookup failed', async () => {
+    const att = sampleAttestation();
+    const frag = fragmentFor(att);
+    const absent = await resolveBalanceAttestation(frag, {
+      network: 'regtest',
+      maxBlobBytes: 1_000_000,
+      fetchNullifier: async () => ({
+        present: false,
+        audit_path: [],
+        tree_size: 1n,
+        root: 'bb'.repeat(32),
+        tip_block_hash: 'cc'.repeat(32),
+        tip_height: 10n,
+      }),
+    });
+    expect(absent.checks.find((c) => c.id === 'anchor_path_b')?.status).toBe('open');
+
+    const failed = await resolveBalanceAttestation(frag, {
+      network: 'regtest',
+      maxBlobBytes: 1_000_000,
+      fetchNullifier: async () => {
+        throw new Error('nf down');
+      },
+    });
+    expect(failed.checks.find((c) => c.id === 'anchor_path_b')?.detail).toMatch(/nf down/);
+  });
+
+  it('handle form: missing handle, no holders, holders fetch fail, comma holderHint', async () => {
+    const att = sampleAttestation();
+    const body = serializeBalanceAttestationV1(att);
+    const handle = sha256(body);
+
+    const missing = await resolveBalanceAttestation(
+      {
+        status: 'ok',
+        kind: 'balance',
+        address: att.subject.slice(),
+        assetIdHex: encodeHexLower(att.assetId),
+        attestationForm: 'handle',
+      },
+      { network: 'regtest', maxBlobBytes: 1_000_000 },
+    );
+    expect(missing.fatalError).toMatch(/handle missing/);
+
+    const noHolders = await resolveBalanceAttestation(
+      {
+        status: 'ok',
+        kind: 'balance',
+        address: att.subject.slice(),
+        assetIdHex: encodeHexLower(att.assetId),
+        attestationForm: 'handle',
+        attestationHandle: handle,
+      },
+      { network: 'regtest', maxBlobBytes: 1_000_000 },
+    );
+    expect(noHolders.fatalError).toMatch(/BlobLocatorSet/);
+
+    const fetchFail = await resolveBalanceAttestation(
+      {
+        status: 'ok',
+        kind: 'balance',
+        address: att.subject.slice(),
+        assetIdHex: encodeHexLower(att.assetId),
+        attestationForm: 'handle',
+        attestationHandle: handle,
+        holderHint: 'https://a.example, https://b.example',
+      },
+      {
+        network: 'regtest',
+        maxBlobBytes: 1_000_000,
+        fetchFromHolders: async () => {
+          throw new Error('holders down');
+        },
+      },
+    );
+    expect(fetchFail.fatalError).toMatch(/holders down/);
+
+    const ok = await resolveBalanceAttestation(
+      {
+        status: 'ok',
+        kind: 'balance',
+        address: att.subject.slice(),
+        assetIdHex: encodeHexLower(att.assetId),
+        attestationForm: 'handle',
+        attestationHandle: handle,
+        holderHint: 'https://a.example,https://b.example',
+      },
+      {
+        network: 'regtest',
+        maxBlobBytes: 1_000_000,
+        fetchFromHolders: async () => ({ body, holder: 'https://a.example' }),
+        fetchNullifier: async () => ({
+          present: false,
+          audit_path: [],
+          tree_size: 1n,
+          root: 'bb'.repeat(32),
+          tip_block_hash: 'cc'.repeat(32),
+          tip_height: 10n,
+        }),
+      },
+    );
+    expect(ok.fields?.balance).toBe('9000');
+  });
+
+  it('inline empty body and decode error on resolve', async () => {
+    const att = sampleAttestation();
+    const empty = await resolveBalanceAttestation(
+      {
+        status: 'ok',
+        kind: 'balance',
+        address: att.subject.slice(),
+        assetIdHex: encodeHexLower(att.assetId),
+        attestationForm: 'inline',
+        attestationInline: '',
+      },
+      { network: 'regtest', maxBlobBytes: 1_000_000 },
+    );
+    expect(empty.fatalError).toMatch(/inline.*missing/);
+
+    const badB64 = await resolveBalanceAttestation(
+      {
+        status: 'ok',
+        kind: 'balance',
+        address: att.subject.slice(),
+        assetIdHex: encodeHexLower(att.assetId),
+        attestationForm: 'inline',
+        attestationInline: '!!!',
+      },
+      { network: 'regtest', maxBlobBytes: 1_000_000 },
+    );
+    expect(badB64.checks.find((c) => c.id === 'obtain')?.status).toBe('fail');
   });
 });

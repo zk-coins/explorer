@@ -59,6 +59,9 @@ export function AccumulatorPageClient() {
   if (error !== null) {
     return <ErrorState title="Failed to load accumulator" message={error} />;
   }
+  /* v8 ignore next 3 -- fetchInfo/fetchAccumulator succeed together
+     (accumulator+info set in the same batched update as loading=false) or
+     throw (caught above, returned via the error!==null check first) */
   if (accumulator === null || info === null) {
     return <ErrorState title="Failed to load accumulator" message="No data returned" />;
   }

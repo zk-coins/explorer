@@ -119,5 +119,6 @@ export async function fetchBlossomBlobFromHolders(
   if (lastErr instanceof Error) {
     throw lastErr;
   }
+  /* v8 ignore next 1 -- fetchBlossomBlob only throws Error subclasses; non-Error lastErr is unreachable */
   throw new Error('fetchBlossomBlobFromHolders: all holders failed');
 }

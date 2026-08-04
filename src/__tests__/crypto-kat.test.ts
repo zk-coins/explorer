@@ -13,6 +13,7 @@ import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
 import {
   deriveBlobKey,
   deriveNoteKey,
+  deriveOutKey,
   hkdfSha256,
   TAG_BLOB_KEY,
   TAG_NOTE_KEY,
@@ -52,6 +53,17 @@ describe('HKDF known-answer vectors', () => {
     expect(encodeHexLower(deriveNoteKey(ss, epk))).toBe(
       '71f59869be4a6fa31732c4caee5f142a8bbac17f126fe78affebc19909c8fe33',
     );
+  });
+
+  it('hkdfSha256 rejects empty tag/material; derive* reject wrong lengths', () => {
+    expect(() => hkdfSha256('', kTx)).toThrow(/tag is required/);
+    expect(() => hkdfSha256('t', new Uint8Array(0))).toThrow(/material/);
+    expect(() => deriveBlobKey(new Uint8Array(16))).toThrow(/32 bytes/);
+    expect(() => deriveNoteKey(new Uint8Array(16), kTx)).toThrow(/ss must be 32/);
+    expect(() => deriveNoteKey(kTx, new Uint8Array(16))).toThrow(/epk must be 32/);
+    expect(() => deriveOutKey(new Uint8Array(16), kTx)).toThrow(/ovk must be 32/);
+    expect(() => deriveOutKey(kTx, new Uint8Array(16))).toThrow(/epk must be 32/);
+    expect(deriveOutKey(kTx, kTx).length).toBe(32);
   });
 });
 

@@ -119,9 +119,11 @@ jobs:
         env:
           NEXT_PUBLIC_NODE_BASE_URL: https://ci-node.example.invalid
 
-      - name: Test
+      - name: Test with 100% coverage gate
         working-directory: explorer
-        run: npm test
+        run: npm run test:coverage
+        env:
+          NEXT_PUBLIC_NODE_BASE_URL: https://ci-node.example.invalid
 
       # Dummy origin only — never a real node. next.config.js requires a
       # non-empty http(s) URL at build time; this value is not used as a

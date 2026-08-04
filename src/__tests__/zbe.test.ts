@@ -9,6 +9,7 @@ import {
   ZBE_TAG_LEN,
   ZbeError,
   verifyBlobId,
+  zbeNonce,
   zbeOpen,
   zbeSeal,
 } from '@/lib/crypto/zbe';
@@ -227,5 +228,67 @@ describe('ZBE §4.2.1', () => {
     tampered[tampered.length - 1]! ^= 0x01;
     expect(verifyBlobId(tampered, blobId)).toBe(false);
     expect(verifyBlobId(ciphertext, blobId)).toBe(true);
+  });
+
+  it('rejects bad key length, non-Uint8Array plaintext/ciphertext, truncated framing', () => {
+    expect(() => zbeSeal(new Uint8Array(16), new Uint8Array(1))).toThrow(ZbeError);
+    expect(() => zbeOpen(new Uint8Array(16), new Uint8Array(20))).toThrow(ZbeError);
+    expect(() => zbeSeal(testKtx(), 'not-bytes' as unknown as Uint8Array)).toThrow(
+      /plaintext must be a Uint8Array/,
+    );
+    expect(() => zbeOpen(testKtx(), 'not-bytes' as unknown as Uint8Array)).toThrow(
+      /ciphertext must be a Uint8Array/,
+    );
+    expect(() => zbeOpen(testKtx(), new Uint8Array(4))).toThrow(/truncated/);
+  });
+
+  it('rejects N=0, chunk length overrun, chunk too short', () => {
+    const k = testKtx();
+    // N=0 framed ciphertext.
+    const n0 = new Uint8Array(8);
+    n0.set(ZBE_MAGIC, 0);
+    // n already 0
+    try {
+      zbeOpen(k, n0);
+      expect.fail('expected invalid_chunk_count');
+    } catch (err) {
+      expect((err as ZbeError).code).toBe('invalid_chunk_count');
+    }
+
+    // N=1 but length claims more than remaining.
+    const overrun = new Uint8Array(12);
+    overrun.set(ZBE_MAGIC, 0);
+    overrun[7] = 1;
+    overrun[8] = 0;
+    overrun[9] = 0;
+    overrun[10] = 0;
+    overrun[11] = 100; // len=100, only 0 remaining
+    try {
+      zbeOpen(k, overrun);
+      expect.fail('expected chunk_length_overrun');
+    } catch (err) {
+      expect((err as ZbeError).code).toBe('chunk_length_overrun');
+    }
+
+    // N=1, len shorter than tag.
+    const short = new Uint8Array(12);
+    short.set(ZBE_MAGIC, 0);
+    short[7] = 1;
+    short[11] = 8; // len=8 < 16
+    // need 8 more bytes of payload after len
+    const shortFull = new Uint8Array(12 + 8);
+    shortFull.set(short, 0);
+    try {
+      zbeOpen(k, shortFull);
+      expect.fail('expected chunk_too_short');
+    } catch (err) {
+      expect((err as ZbeError).code).toBe('chunk_too_short');
+    }
+  });
+
+  it('zbeNonce out of range; verifyBlobId wrong length', () => {
+    expect(() => zbeNonce(-1)).toThrow(/u32 range/);
+    expect(() => zbeNonce(1.5)).toThrow(/u32 range/);
+    expect(() => verifyBlobId(new Uint8Array(1), new Uint8Array(16))).toThrow(/32 bytes/);
   });
 });
