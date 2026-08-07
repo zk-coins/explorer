@@ -100,6 +100,20 @@ export interface MeshDeliveryCandidate {
   zbeCiphertext?: Uint8Array;
 }
 
+/**
+ * A mesh candidate whose detect_tag genuinely matched this ivk but which could
+ * not be resolved into a history entry (missing size ceiling, no holder to
+ * fetch from, blob fetch failed, or missing coin_id for outgoing). Never
+ * silently dropped — always surfaced as a fail check so an incomplete scan is
+ * never rendered as a clean "no payments" result.
+ */
+export interface MeshUnresolvedCandidate {
+  side: 'incoming' | 'outgoing';
+  epkHex: string;
+  blobIdHex: string;
+  reason: string;
+}
+
 export interface AddressViewDeps {
   /**
    * Scan paired relays / mesh gateway for kind-1059 delivery candidates.
@@ -254,6 +268,7 @@ export async function defaultScanMesh(opts: {
   }
   const fetchImpl = opts.fetchImpl !== undefined ? opts.fetchImpl : fetch;
   const out: MeshDeliveryCandidate[] = [];
+  const unreachable: string[] = [];
   for (const relay of opts.relayUrls) {
     const url = `${relay}/.well-known/zkcoins/delivery-events`;
     let res: Response;
@@ -263,8 +278,10 @@ export async function defaultScanMesh(opts: {
         headers: { Accept: 'application/json' },
         signal: opts.signal,
       });
-    } catch {
-      // Unreachable relay — try the next; overall emptiness is handled above.
+    } catch (err) {
+      // Unreachable relay — try the next; total outage throws after the loop.
+      const detail = err instanceof Error ? err.message : String(err);
+      unreachable.push(`${relay}: ${detail}`);
       continue;
     }
     if (!res.ok) {
@@ -319,6 +336,12 @@ export async function defaultScanMesh(opts: {
       }
     }
   }
+  // Total outage: every relay threw on fetch — not the same as "no matches".
+  if (unreachable.length === opts.relayUrls.length) {
+    throw new Error(
+      `all ${opts.relayUrls.length} relay(s) unreachable: ${unreachable.join('; ')}`,
+    );
+  }
   return out;
 }
 
@@ -333,7 +356,11 @@ export function buildAddressView(
     incoming?: DiscoveredIncoming[];
     outgoing?: DiscoveredOutgoing[];
   } = {},
-  opts: { meshScanned?: boolean } = {},
+  opts: {
+    meshScanned?: boolean;
+    maxBlobBytesError?: string;
+    unresolvedCandidates?: MeshUnresolvedCandidate[];
+  } = {},
 ): AddressViewResult {
   const checks: CheckItem[] = [];
   let mode: AddressViewMode;
@@ -364,11 +391,23 @@ export function buildAddressView(
   );
   checks.push(pass('address_bind', 'Fragment address', `subject ${addressHex}`));
 
+  if (opts.maxBlobBytesError !== undefined) {
+    checks.push(
+      fail(
+        'node_info',
+        'GET /v1/info (max_blob_bytes for mesh blob fetch)',
+        opts.maxBlobBytesError,
+      ),
+    );
+  }
+
   const history: HistoryEntry[] = [];
   const incoming = discoveries.incoming ?? [];
   const outgoing = discoveries.outgoing ?? [];
   const noDiscoveries = incoming.length === 0 && outgoing.length === 0;
   const meshScanned = opts.meshScanned === true;
+  const unresolvedCandidates = opts.unresolvedCandidates ?? [];
+  const hasUnresolved = unresolvedCandidates.length > 0;
 
   if (noDiscoveries && !meshScanned) {
     checks.push(
@@ -376,6 +415,14 @@ export function buildAddressView(
         'mesh_scan',
         'Nostr mesh scan (detect_tag match)',
         'Not yet resolvable: no holder/relay URLs and no mesh scan result — live discovery requires scanning paired relays for kind-1059 gift-wraps',
+      ),
+    );
+  } else if (noDiscoveries && meshScanned && hasUnresolved) {
+    checks.push(
+      fail(
+        'mesh_scan',
+        'Nostr mesh scan (detect_tag match)',
+        `Mesh scan completed; ${unresolvedCandidates.length} detect_tag match(es) could not be resolved into history (see mesh_unresolved_* checks) — not a verified 'no payments' result`,
       ),
     );
   } else if (noDiscoveries && meshScanned) {
@@ -392,6 +439,16 @@ export function buildAddressView(
         'mesh_scan',
         'Nostr mesh scan (detect_tag match)',
         `Processing ${incoming.length} incoming + ${outgoing.length} outgoing discovered bundle(s)`,
+      ),
+    );
+  }
+
+  for (const u of unresolvedCandidates) {
+    checks.push(
+      fail(
+        `mesh_unresolved_${u.side}_${u.epkHex.slice(0, 8)}`,
+        'Delivery candidate matched detect_tag but could not be resolved',
+        `${u.side} epk=${u.epkHex.slice(0, 16)}… blob=${u.blobIdHex.slice(0, 16)}…: ${u.reason}`,
       ),
     );
   }
@@ -527,7 +584,7 @@ export function buildAddressView(
     checks,
     history,
   };
-  if (noDiscoveries && !meshScanned) {
+  if (noDiscoveries && (!meshScanned || hasUnresolved)) {
     result.historyNotResolvable = true;
   }
   return result;
@@ -564,13 +621,15 @@ export async function resolveAddressView(
       : fetchBlossomBlobFromHolders;
 
   let maxBlobBytes = deps.maxBlobBytes;
+  let maxBlobBytesError: string | undefined;
   if (maxBlobBytes === undefined) {
     try {
       const fetchInfoFn = deps.fetchInfo !== undefined ? deps.fetchInfo : fetchInfo;
       const info = await fetchInfoFn({ baseUrl: deps.baseUrl, signal: deps.signal });
       maxBlobBytes = info.max_blob_bytes;
-    } catch {
-      // Mesh may still work with an explicit max; without either, blob fetch fails closed later.
+    } catch (err) {
+      // Mesh scanning may still proceed; blob fetch later surfaces unresolved candidates.
+      maxBlobBytesError = err instanceof Error ? err.message : String(err);
     }
   }
 
@@ -578,13 +637,14 @@ export async function resolveAddressView(
   let meshScanned = false;
   const canScan = relayUrls.length > 0 || deps.scanMesh !== undefined;
   if (canScan) {
-    meshScanned = true;
     try {
       candidates = await scanMesh({
         relayUrls,
         signal: deps.signal,
         fetchImpl: deps.fetchImpl,
       });
+      // Only mark scanned after a successful scanMesh return — not before the call.
+      meshScanned = true;
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       return {
@@ -599,6 +659,7 @@ export async function resolveAddressView(
 
   const incoming: DiscoveredIncoming[] = [];
   const outgoing: DiscoveredOutgoing[] = [];
+  const unresolvedCandidates: MeshUnresolvedCandidate[] = [];
 
   for (const cand of candidates) {
     let expectedTag: Uint8Array;
@@ -612,8 +673,18 @@ export async function resolveAddressView(
     }
 
     if (cand.side === 'outgoing') {
+      if (cand.coinId === undefined) {
+        unresolvedCandidates.push({
+          side: 'outgoing',
+          epkHex: encodeHexLower(cand.epk),
+          blobIdHex: encodeHexLower(cand.blobId),
+          reason:
+            'delivery event is missing coin_id; cannot identify the outgoing coin without inventing an id',
+        });
+        continue;
+      }
       outgoing.push({
-        coinId: cand.coinId !== undefined ? cand.coinId : new Uint8Array(32),
+        coinId: cand.coinId,
         blobId: cand.blobId,
         epk: cand.epk,
         ...(cand.kTx !== undefined ? { kTx: cand.kTx } : {}),
@@ -629,13 +700,28 @@ export async function resolveAddressView(
     }
 
     if (maxBlobBytes === undefined) {
-      // Cannot fetch without a size ceiling — leave as not resolvable for this entry.
+      unresolvedCandidates.push({
+        side: 'incoming',
+        epkHex: encodeHexLower(cand.epk),
+        blobIdHex: encodeHexLower(cand.blobId),
+        reason:
+          maxBlobBytesError !== undefined
+            ? `max_blob_bytes unavailable (GET /v1/info failed: ${maxBlobBytesError}); cannot bound the blob fetch`
+            : 'max_blob_bytes unavailable; cannot bound the blob fetch',
+      });
       continue;
     }
 
     const holders =
       cand.blobLocators.length > 0 ? cand.blobLocators : parseMeshUrls(fragment.holderHint);
     if (holders.length === 0) {
+      unresolvedCandidates.push({
+        side: 'incoming',
+        epkHex: encodeHexLower(cand.epk),
+        blobIdHex: encodeHexLower(cand.blobId),
+        reason:
+          'no Blossom holder/relay base available for this candidate (blob_locators empty and fragment holder-hint has no http(s) base)',
+      });
       continue;
     }
     try {
@@ -644,10 +730,20 @@ export async function resolveAddressView(
         signal: deps.signal,
       });
       incoming.push({ epk: cand.epk, zbeCiphertext: got.body });
-    } catch {
-      // Blob unavailable from holders — skip this candidate.
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      unresolvedCandidates.push({
+        side: 'incoming',
+        epkHex: encodeHexLower(cand.epk),
+        blobIdHex: encodeHexLower(cand.blobId),
+        reason: `blob fetch failed: ${detail}`,
+      });
     }
   }
 
-  return buildAddressView(fragment, { incoming, outgoing }, { meshScanned });
+  return buildAddressView(
+    fragment,
+    { incoming, outgoing },
+    { meshScanned, maxBlobBytesError, unresolvedCandidates },
+  );
 }

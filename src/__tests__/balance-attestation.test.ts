@@ -77,6 +77,8 @@ describe('§5.7 balance attestation', () => {
 
     const view = verifyBalanceAttestationBytes(body, frag, { network: 'regtest' });
     expect(view.checks.find((c) => c.id === 'subject_match')?.status).toBe('fail');
+    expect(view.fatalError).toBeDefined();
+    expect(view.fields).toBeUndefined();
   });
 
   it('fails handle hash mismatch', () => {
@@ -170,6 +172,8 @@ describe('§5.7 balance attestation', () => {
     frag.assetIdHex = 'ff'.repeat(32);
     const view = verifyBalanceAttestationBytes(body, frag, { network: 'regtest' });
     expect(view.checks.find((c) => c.id === 'asset_match')?.status).toBe('fail');
+    expect(view.fatalError).toBeDefined();
+    expect(view.fields).toBeUndefined();
   });
 
   it('network_id mismatch and pure helper without network', () => {

@@ -512,7 +512,8 @@ describe('§5.8 resolveAddressView remaining branches', () => {
       avk: ivk,
       avkByteLength: 32,
     };
-    // No holder, no scanMesh, fetchInfo throws — continues with empty candidates.
+    // No holder, no scanMesh, fetchInfo throws — continues with empty candidates
+    // but surfaces the fetchInfo error as a visible node_info fail check (B1).
     const noScan = await resolveAddressView(frag, {
       fetchInfo: async () => {
         throw new Error('info down');
@@ -520,6 +521,7 @@ describe('§5.8 resolveAddressView remaining branches', () => {
     });
     expect(noScan.historyNotResolvable).toBe(true);
     expect(noScan.fatalError).toBeUndefined();
+    expect(noScan.checks.find((c) => c.id === 'node_info')?.status).toBe('fail');
 
     const scanFail = await resolveAddressView(frag, {
       maxBlobBytes: 1024,
@@ -688,7 +690,8 @@ describe('§5.8 resolveAddressView remaining branches', () => {
     });
     expect(fetchThrow.history.some((h) => h.side === 'incoming')).toBe(false);
 
-    // Outgoing with and without kTx/zbeCiphertext.
+    // Outgoing: recovered (kTx+ciphertext), unresolved (coinId known, no kTx),
+    // and B4 missing-coin_id (never invents all-zero id — only mesh_unresolved fail).
     const avk = new Uint8Array(64);
     avk.set(ivk, 0);
     avk.set(validScalar(4), 32);
@@ -718,11 +721,135 @@ describe('§5.8 resolveAddressView remaining branches', () => {
           blobId,
           blobLocators: [],
           side: 'outgoing',
-          // no coinId / kTx
+          coinId: fill(32, 3),
+          // coin_id known; no kTx/zbeCiphertext → genuine unresolved path
+        },
+        {
+          epk,
+          detectTag: tag,
+          blobId,
+          blobLocators: [],
+          side: 'outgoing',
+          // no coinId / kTx — B4: must not invent all-zero coinId
         },
       ],
     });
     expect(out.history.some((h) => h.side === 'outgoing' && h.status === 'recovered')).toBe(true);
     expect(out.history.some((h) => h.side === 'outgoing' && h.status === 'unresolved')).toBe(true);
+    expect(
+      out.checks.some((c) => c.id.startsWith('mesh_unresolved_outgoing_') && c.status === 'fail'),
+    ).toBe(true);
+    const allZeroHex = encodeHexLower(new Uint8Array(32));
+    expect(
+      out.history.every((h) => !('coinIdHex' in h) || h.coinIdHex !== allZeroHex),
+    ).toBe(true);
+  });
+
+  it('B2: matched detect_tag but blob fetch throws → mesh_unresolved fail, not clean pass', async () => {
+    const ivk = validScalar(5);
+    const epk = xOnlyFromSeed(6);
+    const ss = sharedSecretReceiver(ivk, epk);
+    const tag = digestToBytes(detectTag(ss, epk));
+    const blobId = fill(32, 0xab);
+    const frag: AddrFragmentOk = {
+      status: 'ok',
+      kind: 'addr',
+      address: fill(32, 9),
+      avk: ivk,
+      avkByteLength: 32,
+    };
+    const view = await resolveAddressView(frag, {
+      maxBlobBytes: 1024,
+      scanMesh: async () => [
+        {
+          epk,
+          detectTag: tag,
+          blobId,
+          blobLocators: ['https://h.example'],
+          side: 'incoming',
+        },
+      ],
+      fetchBlobFromHolders: async () => {
+        throw new Error('holder fail');
+      },
+    });
+    expect(view.history.some((h) => h.side === 'incoming')).toBe(false);
+    expect(
+      view.checks.some((c) => c.id.startsWith('mesh_unresolved_incoming_') && c.status === 'fail'),
+    ).toBe(true);
+    expect(view.historyNotResolvable).toBe(true);
+    expect(view.checks.find((c) => c.id === 'mesh_scan')?.status).toBe('fail');
+  });
+
+  it('B3: all relays unreachable → fatalError mesh_scan fail (never pass)', async () => {
+    const ivk = validScalar(5);
+    const frag: AddrFragmentOk = {
+      status: 'ok',
+      kind: 'addr',
+      address: fill(32, 9),
+      avk: ivk,
+      avkByteLength: 32,
+      holderHint: 'https://relay-a.example,https://relay-b.example',
+    };
+    // No deps.scanMesh → defaultScanMesh; every relay fetch throws.
+    const view = await resolveAddressView(frag, {
+      maxBlobBytes: 1024,
+      fetchImpl: async () => {
+        throw new Error('relay down');
+      },
+    });
+    expect(view.fatalError).toBeDefined();
+    expect(view.checks.find((c) => c.id === 'mesh_scan')?.status).toBe('fail');
+    expect(view.checks.find((c) => c.id === 'mesh_scan')?.status).not.toBe('pass');
+  });
+
+  it('B1: fetchInfo throw + matched candidate needing blob → node_info + mesh_unresolved, no hard abort', async () => {
+    const ivk = validScalar(5);
+    const epk = xOnlyFromSeed(6);
+    const ss = sharedSecretReceiver(ivk, epk);
+    const tag = digestToBytes(detectTag(ss, epk));
+    const blobId = fill(32, 0xcd);
+    const frag: AddrFragmentOk = {
+      status: 'ok',
+      kind: 'addr',
+      address: fill(32, 9),
+      avk: ivk,
+      avkByteLength: 32,
+    };
+    const view = await resolveAddressView(frag, {
+      // no maxBlobBytes — forces fetchInfo
+      scanMesh: async () => [
+        {
+          epk,
+          detectTag: tag,
+          blobId,
+          blobLocators: ['https://h.example'],
+          side: 'incoming',
+        },
+      ],
+      fetchInfo: async () => {
+        throw new Error('info endpoint down');
+      },
+    });
+    expect(view.fatalError).toBeUndefined();
+    expect(view.checks.find((c) => c.id === 'node_info')?.status).toBe('fail');
+    const unresolved = view.checks.find(
+      (c) => c.id.startsWith('mesh_unresolved_incoming_') && c.status === 'fail',
+    );
+    expect(unresolved).toBeDefined();
+    expect(unresolved?.detail).toMatch(/info endpoint down/);
+  });
+});
+
+describe('§5.8 defaultScanMesh total outage', () => {
+  it('B3: throws when every relay is unreachable', async () => {
+    await expect(
+      defaultScanMesh({
+        relayUrls: ['https://a.example', 'https://b.example'],
+        fetchImpl: async () => {
+          throw new Error('down');
+        },
+      }),
+    ).rejects.toThrow(/unreachable/);
   });
 });

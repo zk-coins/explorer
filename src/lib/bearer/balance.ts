@@ -131,7 +131,9 @@ export function verifyBalanceAttestationBytes(
 
   const subjectHex = encodeHexLower(att.subject);
   const fragSubjectHex = encodeHexLower(fragment.address);
+  let subjectMismatch = false;
   if (subjectHex !== fragSubjectHex) {
+    subjectMismatch = true;
     checks.push(
       fail(
         'subject_match',
@@ -144,7 +146,9 @@ export function verifyBalanceAttestationBytes(
   }
 
   const assetHex = encodeHexLower(att.assetId);
+  let assetMismatch = false;
   if (assetHex !== fragment.assetIdHex) {
+    assetMismatch = true;
     checks.push(
       fail(
         'asset_match',
@@ -204,6 +208,22 @@ export function verifyBalanceAttestationBytes(
       'Host-side §5.7 precondition; explorer can only probe Path-B presence, not classify completed from own scan',
     ),
   );
+
+  if (subjectMismatch || assetMismatch) {
+    const parts: string[] = [];
+    if (subjectMismatch) {
+      parts.push(`subject mismatch (attestation ${subjectHex} ≠ fragment ${fragSubjectHex})`);
+    }
+    if (assetMismatch) {
+      parts.push(
+        `asset_id mismatch (attestation ${assetHex} ≠ fragment ${fragment.assetIdHex})`,
+      );
+    }
+    return {
+      checks,
+      fatalError: parts.join('; '),
+    };
+  }
 
   return {
     checks,
