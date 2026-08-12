@@ -76,8 +76,8 @@ export interface AddressViewResult {
   checks: CheckItem[];
   history: HistoryEntry[];
   /**
-   * True when this build cannot resolve live history (no mesh scan / no
-   * matching candidates). UI must not present empty history as "no payments".
+   * True when this build cannot fully resolve live history (no mesh scan or
+   * unresolved candidates). UI must not present partial/empty history as complete.
    */
   historyNotResolvable?: boolean;
   fatalError?: string;
@@ -101,17 +101,26 @@ export interface MeshDeliveryCandidate {
 }
 
 /**
- * A mesh candidate whose detect_tag genuinely matched this ivk but which could
- * not be resolved into a history entry (missing size ceiling, no holder to
- * fetch from, blob fetch failed, or missing coin_id for outgoing). Never
- * silently dropped — always surfaced as a fail check so an incomplete scan is
- * never rendered as a clean "no payments" result.
+ * A mesh candidate that could not be fully verified or resolved into a history
+ * entry (unliftable epk, missing size ceiling, no holder to fetch from, blob
+ * fetch failed, or missing coin_id for outgoing). Never silently dropped —
+ * always surfaced as a fail check so an incomplete scan is never rendered as a
+ * clean "no payments" result. Also covers relay-level scan failures and
+ * malformed relay response items that occur before any detect_tag match is
+ * attempted; those placeholder entries use a synthetic sequence id for epkHex
+ * (not a real epk), an empty blobIdHex, and carry the actual diagnostic in
+ * reason.
  */
 export interface MeshUnresolvedCandidate {
   side: 'incoming' | 'outgoing';
   epkHex: string;
   blobIdHex: string;
   reason: string;
+}
+
+export interface MeshScanResult {
+  candidates: MeshDeliveryCandidate[];
+  unresolved: MeshUnresolvedCandidate[];
 }
 
 export interface AddressViewDeps {
@@ -124,7 +133,7 @@ export interface AddressViewDeps {
     relayUrls: string[];
     signal?: AbortSignal;
     fetchImpl?: typeof fetch;
-  }) => Promise<MeshDeliveryCandidate[]>;
+  }) => Promise<MeshScanResult>;
   fetchBlobFromHolders?: typeof fetchBlossomBlobFromHolders;
   fetchInfo?: typeof fetchInfo;
   baseUrl?: string;
@@ -252,6 +261,20 @@ export function parseMeshUrls(hint: string | undefined): string[] {
   return [];
 }
 
+// Deterministic, collision-resistant placeholder for a relay- or item-level scan
+// failure that has no real epk to report. NOT a cryptographic value — purely a
+// display-stable id so mesh_unresolved_* check ids stay distinct across failures
+// within one scan (buildAddressView keys checks by `epkHex.slice(0, 8)`, and every
+// relay/item failure would otherwise share the same JSON/URL-prefix bytes).
+function syntheticUnresolvedId(counter: number): Uint8Array {
+  const buf = new Uint8Array(32);
+  buf[0] = (counter >>> 24) & 0xff;
+  buf[1] = (counter >>> 16) & 0xff;
+  buf[2] = (counter >>> 8) & 0xff;
+  buf[3] = counter & 0xff;
+  return buf;
+}
+
 /**
  * Default mesh scan: GET `{relay}/.well-known/zkcoins/delivery-events`.
  * A gateway or test double returns pre-resolved candidates
@@ -262,13 +285,15 @@ export async function defaultScanMesh(opts: {
   relayUrls: string[];
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
-}): Promise<MeshDeliveryCandidate[]> {
+}): Promise<MeshScanResult> {
   if (opts.relayUrls.length === 0) {
-    return [];
+    return { candidates: [], unresolved: [] };
   }
   const fetchImpl = opts.fetchImpl !== undefined ? opts.fetchImpl : fetch;
   const out: MeshDeliveryCandidate[] = [];
   const unreachable: string[] = [];
+  const unresolved: MeshUnresolvedCandidate[] = [];
+  let unresolvedSeq = 0;
   for (const relay of opts.relayUrls) {
     const url = `${relay}/.well-known/zkcoins/delivery-events`;
     let res: Response;
@@ -282,22 +307,59 @@ export async function defaultScanMesh(opts: {
       // Unreachable relay — try the next; total outage throws after the loop.
       const detail = err instanceof Error ? err.message : String(err);
       unreachable.push(`${relay}: ${detail}`);
+      unresolved.push({
+        side: 'incoming',
+        epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
+        blobIdHex: '',
+        reason: `relay ${relay} produced no usable candidate list (not a detect_tag match — this is a scan-level failure): ${detail}`,
+      });
       continue;
     }
     if (!res.ok) {
+      const detail = `HTTP ${res.status}`;
+      unreachable.push(`${relay}: HTTP ${res.status}`);
+      unresolved.push({
+        side: 'incoming',
+        epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
+        blobIdHex: '',
+        reason: `relay ${relay} produced no usable candidate list (not a detect_tag match — this is a scan-level failure): ${detail}`,
+      });
       continue;
     }
     let raw: unknown;
     try {
       raw = await res.json();
-    } catch {
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      unreachable.push(`${relay}: JSON parse failed: ${detail}`);
+      unresolved.push({
+        side: 'incoming',
+        epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
+        blobIdHex: '',
+        reason: `relay ${relay} produced no usable candidate list (not a detect_tag match — this is a scan-level failure): ${detail}`,
+      });
       continue;
     }
     if (!Array.isArray(raw)) {
+      const detail = 'non-array response';
+      unreachable.push(`${relay}: non-array response`);
+      unresolved.push({
+        side: 'incoming',
+        epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
+        blobIdHex: '',
+        reason: `relay ${relay} produced no usable candidate list (not a detect_tag match — this is a scan-level failure): ${detail}`,
+      });
       continue;
     }
     for (const item of raw) {
       if (item === null || typeof item !== 'object') {
+        unresolved.push({
+          side: 'incoming',
+          epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
+          blobIdHex: '',
+          reason:
+            'malformed delivery-event item from relay (not a detect_tag match — this is a scan-level failure): item is not an object',
+        });
         continue;
       }
       const o = item as Record<string, unknown>;
@@ -331,18 +393,23 @@ export async function defaultScanMesh(opts: {
           candidate.side = 'incoming';
         }
         out.push(candidate);
-      } catch {
-        // Malformed candidate — skip, do not invent.
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        unresolved.push({
+          side: o.side === 'outgoing' ? 'outgoing' : 'incoming',
+          epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
+          blobIdHex: '',
+          reason: `malformed delivery-event item from relay (not a detect_tag match — this is a scan-level failure): ${detail}`,
+        });
       }
     }
   }
-  // Total outage: every relay threw on fetch — not the same as "no matches".
+  // Total outage: no relay produced a usable candidate array — not the same
+  // as "no matches".
   if (unreachable.length === opts.relayUrls.length) {
-    throw new Error(
-      `all ${opts.relayUrls.length} relay(s) unreachable: ${unreachable.join('; ')}`,
-    );
+    throw new Error(`all ${opts.relayUrls.length} relay(s) unreachable: ${unreachable.join('; ')}`);
   }
-  return out;
+  return { candidates: out, unresolved };
 }
 
 /**
@@ -409,23 +476,27 @@ export function buildAddressView(
   const unresolvedCandidates = opts.unresolvedCandidates ?? [];
   const hasUnresolved = unresolvedCandidates.length > 0;
 
-  if (noDiscoveries && !meshScanned) {
-    checks.push(
-      open(
-        'mesh_scan',
-        'Nostr mesh scan (detect_tag match)',
-        'Not yet resolvable: no holder/relay URLs and no mesh scan result — live discovery requires scanning paired relays for kind-1059 gift-wraps',
-      ),
-    );
-  } else if (noDiscoveries && meshScanned && hasUnresolved) {
+  if (hasUnresolved) {
     checks.push(
       fail(
         'mesh_scan',
         'Nostr mesh scan (detect_tag match)',
-        `Mesh scan completed; ${unresolvedCandidates.length} detect_tag match(es) could not be resolved into history (see mesh_unresolved_* checks) — not a verified 'no payments' result`,
+        noDiscoveries
+          ? `Mesh scan completed; ${unresolvedCandidates.length} delivery candidate(s) could not be fully verified or resolved into history (see mesh_unresolved_* checks) — not a verified 'no payments' result`
+          : `Mesh scan completed; processing ${incoming.length} incoming + ${outgoing.length} outgoing discovered bundle(s), but ${unresolvedCandidates.length} delivery candidate(s) could not be fully verified or resolved (see mesh_unresolved_* checks) — history may be incomplete`,
       ),
     );
-  } else if (noDiscoveries && meshScanned) {
+  } else if (!meshScanned) {
+    checks.push(
+      open(
+        'mesh_scan',
+        'Nostr mesh scan (detect_tag match)',
+        noDiscoveries
+          ? 'Not yet resolvable: no holder/relay URLs and no mesh scan result — live discovery requires scanning paired relays for kind-1059 gift-wraps'
+          : `Mesh scan not completed; processing ${incoming.length} incoming + ${outgoing.length} outgoing supplied bundle(s)`,
+      ),
+    );
+  } else if (noDiscoveries) {
     checks.push(
       pass(
         'mesh_scan',
@@ -443,10 +514,10 @@ export function buildAddressView(
     );
   }
 
-  for (const u of unresolvedCandidates) {
+  for (const [i, u] of unresolvedCandidates.entries()) {
     checks.push(
       fail(
-        `mesh_unresolved_${u.side}_${u.epkHex.slice(0, 8)}`,
+        `mesh_unresolved_${u.side}_${u.epkHex.slice(0, 8)}_${i}`,
         'Delivery candidate matched detect_tag but could not be resolved',
         `${u.side} epk=${u.epkHex.slice(0, 16)}… blob=${u.blobIdHex.slice(0, 16)}…: ${u.reason}`,
       ),
@@ -584,7 +655,7 @@ export function buildAddressView(
     checks,
     history,
   };
-  if (noDiscoveries && (!meshScanned || hasUnresolved)) {
+  if ((noDiscoveries && !meshScanned) || hasUnresolved) {
     result.historyNotResolvable = true;
   }
   return result;
@@ -634,23 +705,33 @@ export async function resolveAddressView(
   }
 
   let candidates: MeshDeliveryCandidate[] = [];
+  let scanUnresolved: MeshUnresolvedCandidate[] = [];
   let meshScanned = false;
   const canScan = relayUrls.length > 0 || deps.scanMesh !== undefined;
   if (canScan) {
     try {
-      candidates = await scanMesh({
+      const scanResult = await scanMesh({
         relayUrls,
         signal: deps.signal,
         fetchImpl: deps.fetchImpl,
       });
+      candidates = scanResult.candidates;
+      scanUnresolved = scanResult.unresolved;
       // Only mark scanned after a successful scanMesh return — not before the call.
       meshScanned = true;
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
+      const checks: CheckItem[] = [];
+      if (maxBlobBytesError !== undefined) {
+        checks.push(
+          fail('node_info', 'GET /v1/info (max_blob_bytes for mesh blob fetch)', maxBlobBytesError),
+        );
+      }
+      checks.push(fail('mesh_scan', 'Nostr mesh scan (detect_tag match)', detail));
       return {
         mode,
         addressHex: encodeHexLower(fragment.address),
-        checks: [fail('mesh_scan', 'Nostr mesh scan (detect_tag match)', detail)],
+        checks,
         history: [],
         fatalError: `mesh scan failed: ${detail}`,
       };
@@ -659,13 +740,19 @@ export async function resolveAddressView(
 
   const incoming: DiscoveredIncoming[] = [];
   const outgoing: DiscoveredOutgoing[] = [];
-  const unresolvedCandidates: MeshUnresolvedCandidate[] = [];
+  const unresolvedCandidates: MeshUnresolvedCandidate[] = [...scanUnresolved];
 
   for (const cand of candidates) {
     let expectedTag: Uint8Array;
     try {
       expectedTag = computeDetectTag(ivk, cand.epk);
     } catch {
+      unresolvedCandidates.push({
+        side: cand.side === 'outgoing' ? 'outgoing' : 'incoming',
+        epkHex: encodeHexLower(cand.epk),
+        blobIdHex: encodeHexLower(cand.blobId),
+        reason: 'cannot verify detect_tag for this epk (epk cannot be lifted to a curve point)',
+      });
       continue;
     }
     if (!bytesEqual(expectedTag, cand.detectTag)) {

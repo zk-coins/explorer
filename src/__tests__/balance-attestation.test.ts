@@ -79,6 +79,7 @@ describe('§5.7 balance attestation', () => {
     expect(view.checks.find((c) => c.id === 'subject_match')?.status).toBe('fail');
     expect(view.fatalError).toBeDefined();
     expect(view.fields).toBeUndefined();
+    expect(view.checks.every((c) => !c.detail.includes('9000'))).toBe(true);
   });
 
   it('fails handle hash mismatch', () => {

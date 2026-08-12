@@ -185,15 +185,18 @@ describe('§5.8 address view build', () => {
     // discoveries are NOT injected into buildAddressView.
     const view = await resolveAddressView(frag, {
       maxBlobBytes: 1_048_576n,
-      scanMesh: async () => [
-        {
-          epk,
-          detectTag: tag,
-          blobId,
-          blobLocators: [holder],
-          side: 'incoming',
-        },
-      ],
+      scanMesh: async () => ({
+        candidates: [
+          {
+            epk,
+            detectTag: tag,
+            blobId,
+            blobLocators: [holder],
+            side: 'incoming',
+          },
+        ],
+        unresolved: [],
+      }),
       fetchBlobFromHolders: async () => ({ body: ciphertext, holder }),
       fetchInfo: async () => ({
         network: 'regtest',
@@ -229,15 +232,18 @@ describe('§5.8 address view build', () => {
     };
     const view = await resolveAddressView(frag, {
       maxBlobBytes: 1024n,
-      scanMesh: async () => [
-        {
-          epk,
-          detectTag: fill(32, 0xab), // wrong tag
-          blobId: fill(32, 1),
-          blobLocators: ['https://relay.test.example'],
-          side: 'incoming',
-        },
-      ],
+      scanMesh: async () => ({
+        candidates: [
+          {
+            epk,
+            detectTag: fill(32, 0xab), // wrong tag
+            blobId: fill(32, 1),
+            blobLocators: ['https://relay.test.example'],
+            side: 'incoming',
+          },
+        ],
+        unresolved: [],
+      }),
       fetchBlobFromHolders: async () => {
         throw new Error('must not fetch on tag mismatch');
       },
@@ -301,14 +307,14 @@ describe('§5.8 openOutgoingWithKtx + defaultScanMesh + parseMeshUrls', () => {
   });
 
   it('defaultScanMesh empty relays, skips, and accumulates candidates', async () => {
-    expect(await defaultScanMesh({ relayUrls: [] })).toEqual([]);
+    expect(await defaultScanMesh({ relayUrls: [] })).toEqual({ candidates: [], unresolved: [] });
 
     const epk = xOnlyFromSeed(40);
     const detect = fill(32, 0x11);
     const blobId = fill(32, 0x22);
     const coinId = fill(32, 0x33);
 
-    const candidates = await defaultScanMesh({
+    const { candidates, unresolved } = await defaultScanMesh({
       relayUrls: [
         'https://bad.example',
         'https://notok.example',
@@ -370,6 +376,12 @@ describe('§5.8 openOutgoingWithKtx + defaultScanMesh + parseMeshUrls', () => {
     expect(candidates[1]?.coinId).toEqual(coinId);
     expect(candidates[2]?.side).toBe('outgoing');
     expect(candidates[2]?.coinId).toBeUndefined();
+    expect(unresolved).toHaveLength(6);
+    expect(
+      unresolved.filter((item) => item.reason.includes('malformed delivery-event item')),
+    ).toHaveLength(2);
+    expect(unresolved.some((item) => item.reason.includes('item is not an object'))).toBe(true);
+    expect(unresolved.some((item) => item.reason.includes('mesh.epk'))).toBe(true);
   });
 });
 
@@ -500,9 +512,94 @@ describe('§5.8 buildAddressView remaining branches', () => {
     });
     expect(withIncomingOnly.checks.find((c) => c.id === 'outgoing_recovery')?.status).toBe('open');
   });
+
+  it('fails mesh scan and marks partial history when resolved and unresolved coexist', () => {
+    const avk = new Uint8Array(64);
+    avk.set(validScalar(3), 0);
+    avk.set(validScalar(4), 32);
+    const frag: AddrFragmentOk = {
+      status: 'ok',
+      kind: 'addr',
+      address: fill(32, 9),
+      avk,
+      avkByteLength: 64,
+    };
+    const kTx = fill(32, 0x72);
+    const cp = sampleCoinProof(42);
+    const { ciphertext } = zbeSeal(kTx, serializeCoinProof(cp));
+
+    const view = buildAddressView(
+      frag,
+      {
+        outgoing: [
+          {
+            coinId: fill(32, 1),
+            blobId: fill(32, 2),
+            epk: xOnlyFromSeed(8),
+            kTx,
+            zbeCiphertext: ciphertext,
+          },
+        ],
+      },
+      {
+        meshScanned: true,
+        unresolvedCandidates: [
+          {
+            side: 'outgoing',
+            epkHex: encodeHexLower(xOnlyFromSeed(9)),
+            blobIdHex: encodeHexLower(fill(32, 3)),
+            reason: 'delivery event is missing coin_id',
+          },
+        ],
+      },
+    );
+
+    expect(view.history.some((h) => h.side === 'outgoing' && h.status === 'recovered')).toBe(true);
+    expect(view.checks.find((c) => c.id === 'mesh_scan')?.status).toBe('fail');
+    expect(view.historyNotResolvable).toBe(true);
+  });
 });
 
 describe('§5.8 resolveAddressView remaining branches', () => {
+  it('mesh_unresolved_* check ids stay unique when a scan-level and a candidate-level entry share an epk prefix (no duplicate React key)', async () => {
+    const badEpk = new Uint8Array(32);
+    const frag: AddrFragmentOk = {
+      status: 'ok',
+      kind: 'addr',
+      address: fill(32, 9),
+      avk: validScalar(5),
+      avkByteLength: 32,
+    };
+    const view = await resolveAddressView(frag, {
+      maxBlobBytes: 1024,
+      scanMesh: async () => ({
+        candidates: [
+          {
+            epk: badEpk,
+            detectTag: fill(32, 1),
+            blobId: fill(32, 2),
+            blobLocators: [],
+            side: 'incoming',
+          },
+        ],
+        unresolved: [
+          {
+            side: 'incoming',
+            epkHex: encodeHexLower(badEpk),
+            blobIdHex: '',
+            reason: 'relay produced no usable candidate list',
+          },
+        ],
+      }),
+    });
+
+    const ids = view.checks.filter((c) => c.id.startsWith('mesh_unresolved_')).map((c) => c.id);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(view.checks.find((c) => c.id === 'mesh_scan')?.status).toBe('fail');
+    expect(view.historyNotResolvable).toBe(true);
+  });
+
   it('fetchInfo throw continues; canScan false; scanMesh throws', async () => {
     const ivk = validScalar(5);
     const frag: AddrFragmentOk = {
@@ -563,15 +660,18 @@ describe('§5.8 resolveAddressView remaining branches', () => {
 
     // No explicit maxBlobBytes — success assignment at info.max_blob_bytes must run.
     const view = await resolveAddressView(frag, {
-      scanMesh: async () => [
-        {
-          epk,
-          detectTag: tag,
-          blobId,
-          blobLocators: [holder],
-          side: 'incoming',
-        },
-      ],
+      scanMesh: async () => ({
+        candidates: [
+          {
+            epk,
+            detectTag: tag,
+            blobId,
+            blobLocators: [holder],
+            side: 'incoming',
+          },
+        ],
+        unresolved: [],
+      }),
       fetchBlobFromHolders: async (_id, _holders, opts) => {
         expect(opts.maxBlobBytes).toBe(1_048_576n);
         return { body: ciphertext, holder };
@@ -590,7 +690,7 @@ describe('§5.8 resolveAddressView remaining branches', () => {
     expect(view.history.some((h) => h.side === 'incoming')).toBe(true);
   });
 
-  it('candidate loop: ciphertext present, empty holders, fetch throws, outgoing push', async () => {
+  it('candidate loop: malformed epk, ciphertext, holders, fetch failure, and outgoing paths', async () => {
     const ivk = validScalar(5);
     const epk = xOnlyFromSeed(6);
     const badEpk = new Uint8Array(32); // computeDetectTag throws (non-lift)
@@ -617,55 +717,68 @@ describe('§5.8 resolveAddressView remaining branches', () => {
       avkByteLength: 32,
     };
 
-    // Incoming with zbeCiphertext already present; bad epk is skipped.
+    // Incoming with zbeCiphertext already present; bad epk becomes unresolved.
     const pre = await resolveAddressView(frag, {
       maxBlobBytes: 1024,
-      scanMesh: async () => [
-        {
-          epk: badEpk,
-          detectTag: tag,
-          blobId,
-          blobLocators: [],
-          side: 'incoming',
-        },
-        {
-          epk,
-          detectTag: tag,
-          blobId,
-          blobLocators: [],
-          side: 'incoming',
-          zbeCiphertext: ciphertext,
-        },
-      ],
+      scanMesh: async () => ({
+        candidates: [
+          {
+            epk: badEpk,
+            detectTag: tag,
+            blobId,
+            blobLocators: [],
+            side: 'incoming',
+          },
+          {
+            epk,
+            detectTag: tag,
+            blobId,
+            blobLocators: [],
+            side: 'incoming',
+            zbeCiphertext: ciphertext,
+          },
+        ],
+        unresolved: [],
+      }),
     });
     expect(pre.history.some((h) => h.side === 'incoming')).toBe(true);
+    expect(
+      pre.checks.some((c) => c.id.startsWith('mesh_unresolved_incoming_') && c.status === 'fail'),
+    ).toBe(true);
+    expect(pre.checks.find((c) => c.id === 'mesh_scan')?.status).not.toBe('pass');
 
     // Empty holders + no fragment holderHint → skip.
     const noHolders = await resolveAddressView(frag, {
       maxBlobBytes: 1024,
-      scanMesh: async () => [
-        {
-          epk,
-          detectTag: tag,
-          blobId,
-          blobLocators: [],
-          side: 'incoming',
-        },
-      ],
+      scanMesh: async () => ({
+        candidates: [
+          {
+            epk,
+            detectTag: tag,
+            blobId,
+            blobLocators: [],
+            side: 'incoming',
+          },
+        ],
+        unresolved: [],
+      }),
     });
     expect(noHolders.history.some((h) => h.side === 'incoming')).toBe(false);
 
     // maxBlobBytes undefined after info fail + no deps → skip fetch.
     const noCeil = await resolveAddressView(frag, {
-      scanMesh: async () => [
-        {
-          epk,
-          detectTag: tag,
-          blobId,
-          blobLocators: ['https://h.example'],
-          side: 'incoming',
-        },
-      ],
+      scanMesh: async () => ({
+        candidates: [
+          {
+            epk,
+            detectTag: tag,
+            blobId,
+            blobLocators: ['https://h.example'],
+            side: 'incoming',
+          },
+        ],
+        unresolved: [],
+      }),
       fetchInfo: async () => {
         throw new Error('no info');
       },
@@ -675,15 +788,18 @@ describe('§5.8 resolveAddressView remaining branches', () => {
     // fetchFromHolders throws → continue.
     const fetchThrow = await resolveAddressView(frag, {
       maxBlobBytes: 1024,
-      scanMesh: async () => [
-        {
-          epk,
-          detectTag: tag,
-          blobId,
-          blobLocators: ['https://h.example'],
-          side: 'incoming',
-        },
-      ],
+      scanMesh: async () => ({
+        candidates: [
+          {
+            epk,
+            detectTag: tag,
+            blobId,
+            blobLocators: ['https://h.example'],
+            side: 'incoming',
+          },
+        ],
+        unresolved: [],
+      }),
       fetchBlobFromHolders: async () => {
         throw new Error('holder fail');
       },
@@ -704,35 +820,38 @@ describe('§5.8 resolveAddressView remaining branches', () => {
     };
     const out = await resolveAddressView(fullFrag, {
       maxBlobBytes: 1024,
-      scanMesh: async () => [
-        {
-          epk,
-          detectTag: tag,
-          blobId,
-          blobLocators: [],
-          side: 'outgoing',
-          coinId: fill(32, 1),
-          kTx,
-          zbeCiphertext: ciphertext,
-        },
-        {
-          epk,
-          detectTag: tag,
-          blobId,
-          blobLocators: [],
-          side: 'outgoing',
-          coinId: fill(32, 3),
-          // coin_id known; no kTx/zbeCiphertext → genuine unresolved path
-        },
-        {
-          epk,
-          detectTag: tag,
-          blobId,
-          blobLocators: [],
-          side: 'outgoing',
-          // no coinId / kTx — B4: must not invent all-zero coinId
-        },
-      ],
+      scanMesh: async () => ({
+        candidates: [
+          {
+            epk,
+            detectTag: tag,
+            blobId,
+            blobLocators: [],
+            side: 'outgoing',
+            coinId: fill(32, 1),
+            kTx,
+            zbeCiphertext: ciphertext,
+          },
+          {
+            epk,
+            detectTag: tag,
+            blobId,
+            blobLocators: [],
+            side: 'outgoing',
+            coinId: fill(32, 3),
+            // coin_id known; no kTx/zbeCiphertext → genuine unresolved path
+          },
+          {
+            epk,
+            detectTag: tag,
+            blobId,
+            blobLocators: [],
+            side: 'outgoing',
+            // no coinId / kTx — B4: must not invent all-zero coinId
+          },
+        ],
+        unresolved: [],
+      }),
     });
     expect(out.history.some((h) => h.side === 'outgoing' && h.status === 'recovered')).toBe(true);
     expect(out.history.some((h) => h.side === 'outgoing' && h.status === 'unresolved')).toBe(true);
@@ -740,9 +859,7 @@ describe('§5.8 resolveAddressView remaining branches', () => {
       out.checks.some((c) => c.id.startsWith('mesh_unresolved_outgoing_') && c.status === 'fail'),
     ).toBe(true);
     const allZeroHex = encodeHexLower(new Uint8Array(32));
-    expect(
-      out.history.every((h) => !('coinIdHex' in h) || h.coinIdHex !== allZeroHex),
-    ).toBe(true);
+    expect(out.history.every((h) => !('coinIdHex' in h) || h.coinIdHex !== allZeroHex)).toBe(true);
   });
 
   it('B2: matched detect_tag but blob fetch throws → mesh_unresolved fail, not clean pass', async () => {
@@ -760,15 +877,18 @@ describe('§5.8 resolveAddressView remaining branches', () => {
     };
     const view = await resolveAddressView(frag, {
       maxBlobBytes: 1024,
-      scanMesh: async () => [
-        {
-          epk,
-          detectTag: tag,
-          blobId,
-          blobLocators: ['https://h.example'],
-          side: 'incoming',
-        },
-      ],
+      scanMesh: async () => ({
+        candidates: [
+          {
+            epk,
+            detectTag: tag,
+            blobId,
+            blobLocators: ['https://h.example'],
+            side: 'incoming',
+          },
+        ],
+        unresolved: [],
+      }),
       fetchBlobFromHolders: async () => {
         throw new Error('holder fail');
       },
@@ -803,6 +923,85 @@ describe('§5.8 resolveAddressView remaining branches', () => {
     expect(view.checks.find((c) => c.id === 'mesh_scan')?.status).not.toBe('pass');
   });
 
+  it('F1: partial relay outage (one failed, one empty) → mesh_scan fail, not a clean pass', async () => {
+    const frag: AddrFragmentOk = {
+      status: 'ok',
+      kind: 'addr',
+      address: fill(32, 9),
+      avk: validScalar(5),
+      avkByteLength: 32,
+      holderHint: 'https://relay-a.example,https://relay-b.example',
+    };
+    const view = await resolveAddressView(frag, {
+      maxBlobBytes: 1024,
+      fetchImpl: async (url) => {
+        if (String(url).includes('relay-a.example')) {
+          return { ok: false, status: 503 } as unknown as Response;
+        }
+        return { ok: true, json: async () => [] } as unknown as Response;
+      },
+    });
+
+    expect(view.checks.find((c) => c.id === 'mesh_scan')?.status).toBe('fail');
+    expect(view.historyNotResolvable).toBe(true);
+    expect(view.fatalError).toBeUndefined();
+  });
+
+  it('F2: malformed item alongside a valid one → scan marked incomplete despite one resolved candidate', async () => {
+    const ivk = validScalar(5);
+    const epk = xOnlyFromSeed(6);
+    const recipient = digestLabel('recipient/f2');
+    const cp = sampleCoinProof(62, {
+      coin: {
+        identifier: digestLabel('id/f2'),
+        recipient,
+        amount: 11n,
+        assetId: digestLabel('asset/f2'),
+      },
+      epk,
+    });
+    const ss = sharedSecretReceiver(ivk, epk);
+    const kTx = deriveNoteKey(ss, epk);
+    const { ciphertext, blobId } = zbeSeal(kTx, serializeCoinProof(cp));
+    const tag = digestToBytes(detectTag(ss, epk));
+    const relay = 'https://relay-f2.example';
+    const frag: AddrFragmentOk = {
+      status: 'ok',
+      kind: 'addr',
+      address: recipient,
+      avk: ivk,
+      avkByteLength: 32,
+      holderHint: relay,
+    };
+    const view = await resolveAddressView(frag, {
+      maxBlobBytes: 1_048_576n,
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          json: async () => [
+            {
+              epk: encodeHexLower(epk),
+              detect_tag: encodeHexLower(tag),
+              blob_id: encodeHexLower(blobId),
+              blob_locators: [relay],
+              side: 'incoming',
+            },
+            {
+              epk: 'zz',
+              detect_tag: encodeHexLower(tag),
+              blob_id: encodeHexLower(blobId),
+              side: 'incoming',
+            },
+          ],
+        }) as unknown as Response,
+      fetchBlobFromHolders: async () => ({ body: ciphertext, holder: relay }),
+    });
+
+    expect(view.checks.find((c) => c.id === 'mesh_scan')?.status).toBe('fail');
+    expect(view.historyNotResolvable).toBe(true);
+    expect(view.history.some((h) => h.side === 'incoming')).toBe(true);
+  });
+
   it('B1: fetchInfo throw + matched candidate needing blob → node_info + mesh_unresolved, no hard abort', async () => {
     const ivk = validScalar(5);
     const epk = xOnlyFromSeed(6);
@@ -818,15 +1017,18 @@ describe('§5.8 resolveAddressView remaining branches', () => {
     };
     const view = await resolveAddressView(frag, {
       // no maxBlobBytes — forces fetchInfo
-      scanMesh: async () => [
-        {
-          epk,
-          detectTag: tag,
-          blobId,
-          blobLocators: ['https://h.example'],
-          side: 'incoming',
-        },
-      ],
+      scanMesh: async () => ({
+        candidates: [
+          {
+            epk,
+            detectTag: tag,
+            blobId,
+            blobLocators: ['https://h.example'],
+            side: 'incoming',
+          },
+        ],
+        unresolved: [],
+      }),
       fetchInfo: async () => {
         throw new Error('info endpoint down');
       },
@@ -838,6 +1040,28 @@ describe('§5.8 resolveAddressView remaining branches', () => {
     );
     expect(unresolved).toBeDefined();
     expect(unresolved?.detail).toMatch(/info endpoint down/);
+  });
+
+  it('preserves node_info failure when mesh scan also fails', async () => {
+    const frag: AddrFragmentOk = {
+      status: 'ok',
+      kind: 'addr',
+      address: fill(32, 9),
+      avk: validScalar(5),
+      avkByteLength: 32,
+    };
+    const view = await resolveAddressView(frag, {
+      fetchInfo: async () => {
+        throw new Error('info endpoint down');
+      },
+      scanMesh: async () => {
+        throw new Error('mesh endpoint down');
+      },
+    });
+
+    expect(view.checks.find((c) => c.id === 'node_info')?.status).toBe('fail');
+    expect(view.checks.find((c) => c.id === 'mesh_scan')?.status).toBe('fail');
+    expect(view.checks.map((c) => c.id)).toEqual(['node_info', 'mesh_scan']);
   });
 });
 
@@ -851,5 +1075,32 @@ describe('§5.8 defaultScanMesh total outage', () => {
         },
       }),
     ).rejects.toThrow(/unreachable/);
+  });
+
+  it('throws when every relay returns an unusable response', async () => {
+    await expect(
+      defaultScanMesh({
+        relayUrls: [
+          'https://status.example',
+          'https://nonjson.example',
+          'https://nonarray.example',
+        ],
+        fetchImpl: async (url) => {
+          const u = String(url);
+          if (u.includes('status.example')) {
+            return { ok: false, status: 503 } as unknown as Response;
+          }
+          if (u.includes('nonjson.example')) {
+            return {
+              ok: true,
+              json: async () => {
+                throw new Error('invalid JSON');
+              },
+            } as unknown as Response;
+          }
+          return { ok: true, json: async () => ({ candidates: [] }) } as unknown as Response;
+        },
+      }),
+    ).rejects.toThrow(/all 3 relay\(s\) unreachable: .*HTTP 503.*invalid JSON.*non-array response/);
   });
 });

@@ -116,13 +116,6 @@ export function verifyBalanceAttestationBytes(
   let att: BalanceAttestationV1;
   try {
     att = deserializeBalanceAttestationV1(body);
-    checks.push(
-      pass(
-        'decode',
-        'BalanceAttestationV1 decode',
-        `balance=${att.balance.toString(10)} proof_len=${att.proof.length}`,
-      ),
-    );
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     checks.push(fail('decode', 'BalanceAttestationV1 decode', detail));
@@ -131,9 +124,21 @@ export function verifyBalanceAttestationBytes(
 
   const subjectHex = encodeHexLower(att.subject);
   const fragSubjectHex = encodeHexLower(fragment.address);
-  let subjectMismatch = false;
+  const subjectMismatch = subjectHex !== fragSubjectHex;
+  const assetHex = encodeHexLower(att.assetId);
+  const assetMismatch = assetHex !== fragment.assetIdHex;
+
+  checks.push(
+    pass(
+      'decode',
+      'BalanceAttestationV1 decode',
+      subjectMismatch || assetMismatch
+        ? `proof_len=${att.proof.length}`
+        : `balance=${att.balance.toString(10)} proof_len=${att.proof.length}`,
+    ),
+  );
+
   if (subjectHex !== fragSubjectHex) {
-    subjectMismatch = true;
     checks.push(
       fail(
         'subject_match',
@@ -145,10 +150,7 @@ export function verifyBalanceAttestationBytes(
     checks.push(pass('subject_match', 'subject equals fragment address', subjectHex));
   }
 
-  const assetHex = encodeHexLower(att.assetId);
-  let assetMismatch = false;
   if (assetHex !== fragment.assetIdHex) {
-    assetMismatch = true;
     checks.push(
       fail(
         'asset_match',
@@ -215,9 +217,7 @@ export function verifyBalanceAttestationBytes(
       parts.push(`subject mismatch (attestation ${subjectHex} ≠ fragment ${fragSubjectHex})`);
     }
     if (assetMismatch) {
-      parts.push(
-        `asset_id mismatch (attestation ${assetHex} ≠ fragment ${fragment.assetIdHex})`,
-      );
+      parts.push(`asset_id mismatch (attestation ${assetHex} ≠ fragment ${fragment.assetIdHex})`);
     }
     return {
       checks,
