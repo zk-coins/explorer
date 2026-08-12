@@ -187,7 +187,7 @@ describe('PublicHome pagination', () => {
     await Promise.resolve();
   });
 
-  it('loadMore ignores concurrent clicks while loadingMore is true', async () => {
+  it('React suppresses concurrent clicks while loadingMore disables the button', async () => {
     const page1 = {
       ...FIXTURE_INSCRIPTIONS,
       next_height: 200n,
@@ -211,12 +211,12 @@ describe('PublicHome pagination', () => {
     await waitFor(() => {
       expect(screen.getByTestId('load-more-inscriptions')).toBeDisabled();
     });
-    // Second invocation while loadingMore is true — early-returns via the guard.
+    // React's delegated event layer consults the current disabled prop and does
+    // not deliver this second click to loadMore.
     const btn = screen.getByTestId('load-more-inscriptions');
-    btn.removeAttribute('disabled');
     fireEvent.click(btn);
 
-    // Initial page + one page-2 fetch only (second click did not start another).
+    // Initial page + one page-2 fetch only (the disabled click had no listener).
     expect(fetchInscriptions).toHaveBeenCalledTimes(2);
 
     resolvePage2({
@@ -289,5 +289,58 @@ describe('PublicHome pagination', () => {
     btn.click();
     await Promise.resolve();
     expect(fetchInscriptions).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats either missing trailing cursor field as cursor exhaustion', async () => {
+    const partials = [
+      { inscriptions: [], next_height: 201n },
+      { inscriptions: [], next_height: 201n, next_tx_index: 0 },
+    ];
+    for (const partial of partials) {
+      cleanup();
+      fetchInscriptions.mockReset();
+      fetchInscriptions
+        .mockResolvedValueOnce({
+          ...FIXTURE_INSCRIPTIONS,
+          next_height: 200n,
+          next_tx_index: 0,
+          next_vin_index: 0,
+        })
+        .mockResolvedValueOnce(partial);
+      render(<PublicHome />);
+      await waitFor(() => expect(screen.getByTestId('load-more-inscriptions')).toBeTruthy());
+      fireEvent.click(screen.getByTestId('load-more-inscriptions'));
+      await waitFor(() => expect(screen.queryByTestId('load-more-inscriptions')).toBeNull());
+      expect(fetchInscriptions).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it('retains load-more when all three next-cursor fields are present', async () => {
+    fetchInscriptions
+      .mockResolvedValueOnce({
+        ...FIXTURE_INSCRIPTIONS,
+        next_height: 200n,
+        next_tx_index: 0,
+        next_vin_index: 0,
+      })
+      .mockResolvedValueOnce({
+        inscriptions: [],
+        next_height: 201n,
+        next_tx_index: 2,
+        next_vin_index: 3,
+      })
+      .mockResolvedValueOnce({ inscriptions: [] });
+    render(<PublicHome />);
+    await waitFor(() => expect(screen.getByTestId('load-more-inscriptions')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('load-more-inscriptions'));
+    await waitFor(() => expect(fetchInscriptions).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId('load-more-inscriptions')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('load-more-inscriptions'));
+    await waitFor(() => expect(fetchInscriptions).toHaveBeenCalledTimes(3));
+    expect(fetchInscriptions.mock.calls[2]?.[0]).toMatchObject({
+      from_height: 201n,
+      from_tx_index: 2,
+      from_vin_index: 3,
+    });
   });
 });

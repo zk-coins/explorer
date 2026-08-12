@@ -19,6 +19,9 @@ describe('ecdhSharedX', () => {
     expect(() => ecdhSharedX(new Uint8Array(16), xOnlyFromSeed(1))).toThrow(EcdhError);
     expect(() => ecdhSharedX(validScalar(1), new Uint8Array(16))).toThrow(EcdhError);
     expect(() => ecdhSharedX('x' as unknown as Uint8Array, xOnlyFromSeed(1))).toThrow(EcdhError);
+    expect(() => ecdhSharedX(validScalar(1), 'x' as unknown as Uint8Array)).toThrow(
+      /got string/,
+    );
   });
 
   it('rejects scalar out of range and non-quadratic-residue peer', () => {

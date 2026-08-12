@@ -386,7 +386,7 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
         kind: 'tx',
         bundle: blobId,
         view: kTx,
-        holderHint: 'https://a.example, not-a-url, https://b.example',
+        holderHint: 'http://a.example, not-a-url, https://b.example',
       },
       {
         fetchInfo: async () => ({
@@ -398,7 +398,7 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
           features: [],
         }),
         fetchBlobFromHolders: async (_id, holders) => {
-          expect(holders).toEqual(['https://a.example', 'https://b.example']);
+          expect(holders).toEqual(['http://a.example', 'https://b.example']);
           return { body: ciphertext, holder: holders[0]! };
         },
         fetchNullifier: async () => {
@@ -486,6 +486,10 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
     expect(opened2.checks.find((c) => c.id === 'zbe_open')?.status).toBe('fail');
     expect(opened2.fatalError).toMatch(/auth_failed/);
     expect(opened2.fatalError).toMatch(/chunk/);
+
+    const badLength = openConfirmationBlob(new Uint8Array(16), ciphertext, blobId);
+    expect(badLength.fatalError).toMatch(/bad_key_length/);
+    expect(badLength.fatalError).not.toMatch(/chunk/);
   });
 
   it('@-prefixed non-http holderHint falls through to empty list (node Blossom path)', async () => {
@@ -527,6 +531,44 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
     expect(view.checks.find((c) => c.id === 'fetch_blob')?.detail).not.toMatch(
       /Fetched from holder/,
     );
+  });
+
+  it('accepts an @-prefixed http holder URL', async () => {
+    const kTx = fill(32, 0x57);
+    const { ciphertext, blobId } = zbeSeal(kTx, serializeCoinProof(sampleCoinProof(25)));
+    const view = await resolveConfirmationLink(
+      {
+        status: 'ok',
+        kind: 'tx',
+        bundle: blobId,
+        view: kTx,
+        holderHint: '@http://holder.example',
+      },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlobFromHolders: async (_id, holders) => {
+          expect(holders).toEqual(['http://holder.example']);
+          return { body: ciphertext, holder: holders[0]! };
+        },
+        fetchNullifier: async () => ({
+          present: false,
+          audit_path: [],
+          tree_size: 0n,
+          root: 'aa'.repeat(32),
+          tip_block_hash: 'bb'.repeat(32),
+          tip_height: 1n,
+        }),
+        fetchInscriptions: async () => ({ inscriptions: [] }),
+      },
+    );
+    expect(view.checks.find((c) => c.id === 'fetch_blob')?.detail).toMatch(/holder/);
   });
 
   it('resolveConfirmationLink early-returns when openConfirmationBlob fails', async () => {
@@ -656,10 +698,166 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
           next_vin_index: 0,
         };
       },
-      { maxPages: 3 },
+      { pageLimit: 7, maxPages: 3 },
     );
     expect(pagesScanned).toBe(3);
     expect(hit).toBeUndefined();
     expect(calls).toBe(3);
+
+    for (const partial of [
+      { inscriptions: [], next_height: 1n },
+      { inscriptions: [], next_height: 1n, next_tx_index: 0 },
+    ]) {
+      const stopped = await findCreatingPkInInscriptions(
+        'aa'.repeat(32),
+        'bb'.repeat(32),
+        async () => partial,
+      );
+      expect(stopped.pagesScanned).toBe(1);
+    }
+  });
+
+  it('uses the production fetchInfo dependency when no override is supplied', async () => {
+    const kTx = fill(32, 0x60);
+    const { blobId } = zbeSeal(kTx, serializeCoinProof(sampleCoinProof(60)));
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input).endsWith('/v1/info')) {
+        return new Response(
+          JSON.stringify({
+            network: 'regtest',
+            protocol_version: 'v1',
+            finality_confirmations: 6,
+            activation_height: '0',
+            max_blob_bytes: '1048576',
+            features: [],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response('', { status: 503 });
+    }) as typeof fetch;
+    try {
+      const view = await resolveConfirmationLink({
+        status: 'ok',
+        kind: 'tx',
+        bundle: blobId,
+        view: kTx,
+      });
+      expect(view.checks.find((c) => c.id === 'node_info')?.status).toBe('pass');
+      expect(view.checks.find((c) => c.id === 'fetch_blob')?.status).toBe('fail');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('stringifies non-Error dependency failures', async () => {
+    const kTx = fill(32, 0x61);
+    const cp = sampleCoinProof(61);
+    const { ciphertext, blobId } = zbeSeal(kTx, serializeCoinProof(cp));
+    const fragment: TxFragmentOk = { status: 'ok', kind: 'tx', bundle: blobId, view: kTx };
+    const info = {
+      network: 'regtest' as const,
+      protocol_version: 'v1',
+      finality_confirmations: 6,
+      activation_height: 0n,
+      max_blob_bytes: 1_048_576n,
+      features: [] as string[],
+    };
+
+    const infoFailure = await resolveConfirmationLink(fragment, {
+      fetchInfo: async () => {
+        throw 'info string failure';
+      },
+    });
+    expect(infoFailure.fatalError).toMatch(/info string failure/);
+
+    const blobFailure = await resolveConfirmationLink(fragment, {
+      fetchInfo: async () => info,
+      fetchBlob: async () => {
+        throw 'blob string failure';
+      },
+    });
+    expect(blobFailure.fatalError).toBe('blob string failure');
+
+    const downstream = await resolveConfirmationLink(fragment, {
+      fetchInfo: async () => info,
+      fetchBlob: async () => ciphertext,
+      fetchNullifier: async () => {
+        throw 'nullifier string failure';
+      },
+      fetchInscriptions: async () => {
+        throw 'inscriptions string failure';
+      },
+    });
+    expect(downstream.checks.find((c) => c.id === 'nullifier_path_b')?.detail).toMatch(
+      /nullifier string failure/,
+    );
+    expect(downstream.checks.find((c) => c.id === 'state_310')?.detail).toMatch(
+      /inscriptions string failure/,
+    );
+  });
+
+  it('handles a present nullifier without a leaf and a state hit without tip height', async () => {
+    const kTx = fill(32, 0x62);
+    const cp = sampleCoinProof(62);
+    const { ciphertext, blobId } = zbeSeal(kTx, serializeCoinProof(cp));
+    const pkHex = encodeHexLower(cp.creatingNullifier.pkCreate);
+    const rHex = encodeHexLower(cp.creatingNullifier.rCreate);
+    const common = {
+      fetchInfo: async () => ({
+        network: 'regtest' as const,
+        protocol_version: 'v1',
+        finality_confirmations: 6,
+        activation_height: 0n,
+        max_blob_bytes: 1_048_576n,
+        features: [] as string[],
+      }),
+      fetchBlob: async () => ciphertext,
+    };
+    const noLeaf = await resolveConfirmationLink(
+      { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
+      {
+        ...common,
+        fetchNullifier: async () => ({
+          present: true,
+          position: 0n,
+          audit_path: [],
+          tree_size: 1n,
+          root: 'aa'.repeat(32),
+          tip_block_hash: 'bb'.repeat(32),
+          tip_height: 10n,
+        }),
+        fetchInscriptions: async () => ({ inscriptions: [] }),
+      },
+    );
+    expect(noLeaf.checks.find((c) => c.id === 'nullifier_path_b')?.status).toBe('pass');
+    expect(noLeaf.checks.find((c) => c.id === 'nullifier_r_match')).toBeUndefined();
+
+    const hitWithoutTip = await resolveConfirmationLink(
+      { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
+      {
+        ...common,
+        fetchNullifier: async () => {
+          throw new Error('lookup unavailable');
+        },
+        fetchInscriptions: async () => ({
+          inscriptions: [
+            {
+              txid: 'cc'.repeat(32),
+              height: 7n,
+              tx_index: 0,
+              vin_index: 0,
+              count: 1,
+              format: 1,
+              confirmation_state: 'completed' as const,
+              nullifiers: [{ pubkey: pkHex, r: rHex, state: 'completed' as const }],
+            },
+          ],
+        }),
+      },
+    );
+    expect(hitWithoutTip.state).toBe('completed');
+    expect(hitWithoutTip.anchoring?.confirmations).toBeUndefined();
   });
 });

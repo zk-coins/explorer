@@ -56,7 +56,9 @@ describe('HKDF known-answer vectors', () => {
   });
 
   it('hkdfSha256 rejects empty tag/material; derive* reject wrong lengths', () => {
+    expect(() => hkdfSha256(7 as unknown as string, kTx)).toThrow(/tag is required/);
     expect(() => hkdfSha256('', kTx)).toThrow(/tag is required/);
+    expect(() => hkdfSha256('t', 'bytes' as unknown as Uint8Array)).toThrow(/material/);
     expect(() => hkdfSha256('t', new Uint8Array(0))).toThrow(/material/);
     expect(() => deriveBlobKey(new Uint8Array(16))).toThrow(/32 bytes/);
     expect(() => deriveNoteKey(new Uint8Array(16), kTx)).toThrow(/ss must be 32/);

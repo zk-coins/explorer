@@ -117,12 +117,13 @@ export function openConfirmationBlob(
     plaintext = zbeOpen(kTx, ciphertext);
     checks.push(pass('zbe_open', 'ZBE open under zkview (K_tx)', 'All chunks authenticated'));
   } catch (err) {
-    const detail =
-      err instanceof ZbeError
-        ? `${err.code}${err.chunkIndex !== undefined ? ` (chunk ${err.chunkIndex})` : ''}: ${err.message}`
-        : err instanceof Error
-          ? err.message
-          : String(err);
+    let detail: string;
+    /* v8 ignore else -- verifyBlobId's noble SHA-256 call rejects non-Uint8Array ciphertext before zbeOpen; after that, requireKey32 and every framing/auth failure in zbeOpen throw ZbeError */
+    if (err instanceof ZbeError) {
+      detail = `${err.code}${err.chunkIndex !== undefined ? ` (chunk ${err.chunkIndex})` : ''}: ${err.message}`;
+    } else {
+      detail = err instanceof Error ? err.message : String(err);
+    }
     checks.push(fail('zbe_open', 'ZBE open under zkview (K_tx)', detail));
     return { checks, fatalError: detail };
   }
@@ -138,7 +139,7 @@ export function openConfirmationBlob(
     );
     return { checks, coinProof };
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+    const detail = err instanceof Error ? err.message : /* v8 ignore next -- deserializeCoinProof reports every malformed proof with CoinProofError */ String(err);
     checks.push(
       fail('coinproof_decode', 'CoinProof decode (width + digests/points/asset_id)', detail),
     );

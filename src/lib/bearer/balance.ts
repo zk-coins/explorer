@@ -117,7 +117,7 @@ export function verifyBalanceAttestationBytes(
   try {
     att = deserializeBalanceAttestationV1(body);
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+    const detail = err instanceof Error ? err.message : /* v8 ignore next -- deserializeBalanceAttestationV1 reports every malformed wire body with BalanceAttestationError */ String(err);
     checks.push(fail('decode', 'BalanceAttestationV1 decode', detail));
     return { checks, fatalError: detail };
   }

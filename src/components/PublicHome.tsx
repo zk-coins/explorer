@@ -103,8 +103,12 @@ export function PublicHome() {
   }, [loadInitial]);
 
   const loadMore = useCallback(async () => {
-    if (data === null || data.cursor === null || loadingMore) {
-      /* v8 ignore next -- the `data.cursor === null` disjunct is unreachable — the load-more control only renders while cursor !== null, and any concurrent loadMore short-circuits on `loadingMore` (still true, cursor still the old non-null value) before the cursor check; a click on the unmounted button cannot re-enter React's handler */
+    /* v8 ignore if -- loadMore is only attached while data is non-null, and React suppresses onClick for this button while its current loadingMore-derived disabled prop is true */
+    if (data === null || loadingMore) {
+      return;
+    }
+    /* v8 ignore next -- this callback is only attached while data.cursor is non-null; cursor exhaustion unmounts the button, so detached nodes cannot invoke React's delegated handler */
+    if (data.cursor === null) {
       return;
     }
     setLoadingMore(true);

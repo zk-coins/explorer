@@ -156,4 +156,42 @@ describe('fragment parsing', () => {
     vi.stubGlobal('window', undefined);
     expect(readLocationHash()).toBe('');
   });
+
+  it('stringifies non-Error parser failures for every fragment kind', () => {
+    const hostile = {
+      startsWith: () => {
+        throw 'fragment-access-failed';
+      },
+    } as unknown as string;
+    expect(parseTxFragment(hostile)).toEqual({
+      status: 'error',
+      message: 'fragment-access-failed',
+    });
+    expect(parseAddrFragment(hostile)).toEqual({
+      status: 'error',
+      message: 'fragment-access-failed',
+    });
+    expect(parseBalanceFragment(hostile)).toEqual({
+      status: 'error',
+      message: 'fragment-access-failed',
+    });
+  });
+
+  it('rejects defensive undefined split fields for every fragment grammar', () => {
+    const splitBody = (parts: unknown[]): string =>
+      ({
+        startsWith: () => false,
+        length: 1,
+        indexOf: () => -1,
+        split: () => parts,
+      }) as unknown as string;
+
+    expect(parseTxFragment(splitBody([undefined, 'view'])).status).toBe('error');
+    expect(parseTxFragment(splitBody(['bundle', undefined])).status).toBe('error');
+    expect(parseAddrFragment(splitBody([undefined, 'avk'])).status).toBe('error');
+    expect(parseAddrFragment(splitBody(['address', undefined])).status).toBe('error');
+    expect(parseBalanceFragment(splitBody([undefined, 'asset', 'att'])).status).toBe('error');
+    expect(parseBalanceFragment(splitBody(['address', undefined, 'att'])).status).toBe('error');
+    expect(parseBalanceFragment(splitBody(['address', 'asset', undefined])).status).toBe('error');
+  });
 });

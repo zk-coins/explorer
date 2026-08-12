@@ -19,10 +19,16 @@ const baseEntry: InscriptionEntry = {
 
 describe('stateFromInscriptions', () => {
   it('throws when pkHex is empty', () => {
+    expect(() =>
+      stateFromInscriptions(7 as unknown as string, 'cc'.repeat(32), [baseEntry]),
+    ).toThrow(/pkHex/);
     expect(() => stateFromInscriptions('', 'cc'.repeat(32), [baseEntry])).toThrow(/pkHex/);
   });
 
   it('throws when rHex is empty', () => {
+    expect(() =>
+      stateFromInscriptions('aa'.repeat(32), 7 as unknown as string, [baseEntry]),
+    ).toThrow(/rHex/);
     expect(() => stateFromInscriptions('aa'.repeat(32), '', [baseEntry])).toThrow(/rHex/);
   });
 

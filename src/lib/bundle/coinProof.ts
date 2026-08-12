@@ -87,7 +87,11 @@ class Cursor {
   }
 
   take(n: number, ctx: string): Uint8Array {
-    if (n < 0 || this.offset + n > this.buf.length) {
+    if (
+      /* v8 ignore next -- every internal Cursor.take call uses a fixed non-negative width or a decoded u32 length */
+      n < 0 ||
+      this.offset + n > this.buf.length
+    ) {
       throw new CoinProofError(`${ctx}: truncated (need ${n}, have ${this.remaining()})`);
     }
     const slice = this.buf.subarray(this.offset, this.offset + n);
@@ -211,7 +215,7 @@ function requireCanonicalDigest(bytes: Uint8Array, field: string): void {
   try {
     digestFromBytes(bytes);
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+    const detail = err instanceof Error ? err.message : /* v8 ignore next -- SDK digestFromBytes only throws Error subclasses for malformed digest bytes */ String(err);
     throw new CoinProofError(`${field}: non-canonical digest: ${detail}`);
   }
 }
@@ -221,7 +225,7 @@ function requireXOnlyPoint(bytes: Uint8Array, field: string): void {
   try {
     liftXOnly(bytes, field);
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+    const detail = err instanceof Error ? err.message : /* v8 ignore next -- SDK liftXOnly only throws Error subclasses for non-liftable x-only bytes */ String(err);
     throw new CoinProofError(`${field}: invalid x-only curve point: ${detail}`);
   }
 }

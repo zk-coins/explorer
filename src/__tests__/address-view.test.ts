@@ -91,7 +91,7 @@ describe('§5.8 address view build', () => {
       avkByteLength: 64,
     };
     // Production path: resolveAddressView with no holder / no scan.
-    const view = await resolveAddressView(frag);
+    const view = await resolveAddressView(frag, { maxBlobBytes: 1_048_576n });
     expect(view.mode).toBe('full');
     expect(view.historyNotResolvable).toBe(true);
     expect(view.checks.find((c) => c.id === 'mesh_scan')?.status).toBe('open');
@@ -296,10 +296,11 @@ describe('§5.8 openOutgoingWithKtx + defaultScanMesh + parseMeshUrls', () => {
   it('parseMeshUrls branches', () => {
     expect(parseMeshUrls(undefined)).toEqual([]);
     expect(parseMeshUrls('')).toEqual([]);
+    expect(parseMeshUrls('@http://r.example/')).toEqual(['http://r.example']);
     expect(parseMeshUrls('@https://r.example/')).toEqual(['https://r.example']);
     expect(parseMeshUrls('@not-http')).toEqual([]);
-    expect(parseMeshUrls('https://a.example/,ftp://x,https://b.example')).toEqual([
-      'https://a.example',
+    expect(parseMeshUrls('http://a.example/,ftp://x,https://b.example')).toEqual([
+      'http://a.example',
       'https://b.example',
     ]);
     expect(parseMeshUrls('https://solo.example/')).toEqual(['https://solo.example']);
@@ -343,12 +344,13 @@ describe('§5.8 openOutgoingWithKtx + defaultScanMesh + parseMeshUrls', () => {
           ok: true,
           json: async () => [
             null,
+            42,
             { epk: 'zz' }, // malformed hex
             {
               epk: encodeHexLower(epk),
               detect_tag: encodeHexLower(detect),
               blob_id: encodeHexLower(blobId),
-              blob_locators: ['https://h.example/', 'ftp://skip', 1],
+              blob_locators: ['http://h0.example/', 'https://h.example/', 'ftp://skip', 1],
               side: 'incoming',
             },
             {
@@ -371,15 +373,18 @@ describe('§5.8 openOutgoingWithKtx + defaultScanMesh + parseMeshUrls', () => {
     });
     expect(candidates.length).toBe(3);
     expect(candidates[0]?.side).toBe('incoming');
-    expect(candidates[0]?.blobLocators).toEqual(['https://h.example']);
+    expect(candidates[0]?.blobLocators).toEqual([
+      'http://h0.example',
+      'https://h.example',
+    ]);
     expect(candidates[1]?.side).toBe('outgoing');
     expect(candidates[1]?.coinId).toEqual(coinId);
     expect(candidates[2]?.side).toBe('outgoing');
     expect(candidates[2]?.coinId).toBeUndefined();
-    expect(unresolved).toHaveLength(6);
+    expect(unresolved).toHaveLength(7);
     expect(
       unresolved.filter((item) => item.reason.includes('malformed delivery-event item')),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     expect(unresolved.some((item) => item.reason.includes('item is not an object'))).toBe(true);
     expect(unresolved.some((item) => item.reason.includes('mesh.epk'))).toBe(true);
   });
@@ -475,6 +480,13 @@ describe('§5.8 buildAddressView remaining branches', () => {
             epk: xOnlyFromSeed(8),
             kTx,
             zbeCiphertext: ciphertext,
+          },
+          {
+            coinId: fill(32, 3),
+            blobId: fill(32, 4),
+            epk: xOnlyFromSeed(9),
+            kTx,
+            // no ciphertext: reaches the second missing-material guard operand
           },
         ],
       },
@@ -688,6 +700,38 @@ describe('§5.8 resolveAddressView remaining branches', () => {
 
     expect(view.fatalError).toBeUndefined();
     expect(view.history.some((h) => h.side === 'incoming')).toBe(true);
+  });
+
+  it('uses the production fetchInfo dependency only through a global fetch stub', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      expect(String(input)).toMatch(/\/v1\/info$/);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: '0',
+          max_blob_bytes: '1048576',
+          features: [],
+        }),
+      } as unknown as Response;
+    }) as typeof fetch;
+    try {
+      const view = await resolveAddressView({
+        status: 'ok',
+        kind: 'addr',
+        address: fill(32, 9),
+        avk: validScalar(5),
+        avkByteLength: 32,
+      });
+      expect(view.checks.find((c) => c.id === 'node_info')).toBeUndefined();
+      expect(view.historyNotResolvable).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('candidate loop: malformed epk, ciphertext, holders, fetch failure, and outgoing paths', async () => {
@@ -1102,5 +1146,200 @@ describe('§5.8 defaultScanMesh total outage', () => {
         },
       }),
     ).rejects.toThrow(/all 3 relay\(s\) unreachable: .*HTTP 503.*invalid JSON.*non-array response/);
+  });
+
+  it('uses global fetch and reports non-Error transport and JSON failures', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => ({ ok: true, json: async () => [] }) as Response) as typeof fetch;
+    try {
+      await expect(defaultScanMesh({ relayUrls: ['https://global.example'] })).resolves.toEqual({
+        candidates: [],
+        unresolved: [],
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    await expect(
+      defaultScanMesh({
+        relayUrls: ['https://string-throw.example'],
+        fetchImpl: async () => {
+          throw 'transport string failure';
+        },
+      }),
+    ).rejects.toThrow(/transport string failure/);
+
+    await expect(
+      defaultScanMesh({
+        relayUrls: ['https://json-string.example'],
+        fetchImpl: async () =>
+          ({
+            ok: true,
+            json: async () => {
+              throw 'json string failure';
+            },
+          }) as unknown as Response,
+      }),
+    ).rejects.toThrow(/json string failure/);
+  });
+
+  it('records each missing mesh field and stringifies a hostile field conversion', async () => {
+    const epkHex = encodeHexLower(xOnlyFromSeed(70));
+    const tagHex = encodeHexLower(fill(32, 0x11));
+    const blobHex = encodeHexLower(fill(32, 0x22));
+    const result = await defaultScanMesh({
+      relayUrls: ['https://malformed.example'],
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          json: async () => [
+            { detect_tag: tagHex, blob_id: blobHex },
+            { epk: epkHex, blob_id: blobHex },
+            { epk: epkHex, detect_tag: tagHex },
+            { epk: 'zz', side: 'outgoing' },
+            {
+              epk: {
+                toString: () => {
+                  throw 'field conversion string failure';
+                },
+              },
+            },
+          ],
+        }) as unknown as Response,
+    });
+    expect(result.candidates).toEqual([]);
+    expect(result.unresolved).toHaveLength(5);
+    expect(result.unresolved.some((u) => u.reason.includes('mesh.epk'))).toBe(true);
+    expect(result.unresolved.some((u) => u.reason.includes('mesh.detect_tag'))).toBe(true);
+    expect(result.unresolved.some((u) => u.reason.includes('mesh.blob_id'))).toBe(true);
+    expect(result.unresolved.some((u) => u.side === 'outgoing')).toBe(true);
+    expect(result.unresolved.some((u) => u.reason.includes('field conversion string failure'))).toBe(
+      true,
+    );
+  });
+});
+
+describe('§5.8 non-Error fallbacks and AVK invariants', () => {
+  const baseFragment = (): AddrFragmentOk => ({
+    status: 'ok',
+    kind: 'addr',
+    address: fill(32, 9),
+    avk: validScalar(5),
+    avkByteLength: 32,
+  });
+
+  it('stringifies AVK access failures and preserves the declared fallback mode', async () => {
+    const hostileAvk = {
+      get length() {
+        throw 'avk length string failure';
+      },
+    } as unknown as Uint8Array;
+    const incoming = buildAddressView({ ...baseFragment(), avk: hostileAvk });
+    expect(incoming.mode).toBe('incoming_only');
+    expect(incoming.fatalError).toBe('avk length string failure');
+
+    const resolved = await resolveAddressView({ ...baseFragment(), avk: hostileAvk });
+    expect(resolved.mode).toBe('incoming_only');
+    expect(resolved.fatalError).toBe('avk length string failure');
+
+    const invalidFull = new Uint8Array(64);
+    invalidFull.set(validScalar(3));
+    const full = buildAddressView({ ...baseFragment(), avk: invalidFull, avkByteLength: 64 });
+    expect(full.mode).toBe('full');
+    expect(full.fatalError).toMatch(/zkavk\.ovk/);
+
+    const resolvedFull = await resolveAddressView({
+      ...baseFragment(),
+      avk: invalidFull,
+      avkByteLength: 64,
+    });
+    expect(resolvedFull.mode).toBe('full');
+    expect(resolvedFull.fatalError).toMatch(/zkavk\.ovk/);
+  });
+
+  it('labels incoming ECDH failures and stringifies dependency rejections', async () => {
+    const ecdh = buildAddressView(baseFragment(), {
+      incoming: [{ epk: fill(16, 1), zbeCiphertext: new Uint8Array(8) }],
+    });
+    expect(ecdh.checks.find((c) => c.id === 'incoming_decrypt')?.detail).toMatch(/EcdhError/);
+
+    const ivk = validScalar(5);
+    const epk = xOnlyFromSeed(72);
+    const ss = sharedSecretReceiver(ivk, epk);
+    const kTx = deriveNoteKey(ss, epk);
+    const invalidProof = zbeSeal(kTx, new Uint8Array([1, 2, 3])).ciphertext;
+    const coinProof = buildAddressView(
+      { ...baseFragment(), avk: ivk },
+      { incoming: [{ epk, zbeCiphertext: invalidProof }] },
+    );
+    expect(coinProof.checks.find((c) => c.id === 'incoming_decrypt')?.detail).toMatch(
+      /CoinProof/,
+    );
+
+    const infoFailure = await resolveAddressView(baseFragment(), {
+      fetchInfo: async () => {
+        throw 'info string failure';
+      },
+    });
+    expect(infoFailure.checks.find((c) => c.id === 'node_info')?.detail).toBe(
+      'info string failure',
+    );
+
+    const scanFailure = await resolveAddressView(baseFragment(), {
+      maxBlobBytes: 1024,
+      scanMesh: async () => {
+        throw 'scan string failure';
+      },
+    });
+    expect(scanFailure.fatalError).toMatch(/scan string failure/);
+  });
+
+  it('classifies an outgoing malformed epk and stringifies blob fetch rejection', async () => {
+    const ivk = validScalar(5);
+    const epk = xOnlyFromSeed(71);
+    const ss = sharedSecretReceiver(ivk, epk);
+    const tag = digestToBytes(detectTag(ss, epk));
+    const blobId = fill(32, 0x44);
+    const outgoingBad = await resolveAddressView(baseFragment(), {
+      maxBlobBytes: 1024,
+      scanMesh: async () => ({
+        candidates: [
+          {
+            epk: new Uint8Array(32),
+            detectTag: fill(32, 1),
+            blobId,
+            blobLocators: [],
+            side: 'outgoing',
+          },
+        ],
+        unresolved: [],
+      }),
+    });
+    expect(outgoingBad.checks.some((c) => c.id.startsWith('mesh_unresolved_outgoing_'))).toBe(
+      true,
+    );
+
+    const fetchFailure = await resolveAddressView(
+      { ...baseFragment(), avk: ivk },
+      {
+        maxBlobBytes: 1024,
+        scanMesh: async () => ({
+          candidates: [
+            {
+              epk,
+              detectTag: tag,
+              blobId,
+              blobLocators: ['https://holder.example'],
+              side: 'incoming',
+            },
+          ],
+          unresolved: [],
+        }),
+        fetchBlobFromHolders: async () => {
+          throw 'blob string failure';
+        },
+      },
+    );
+    expect(fetchFailure.checks.some((c) => c.detail.includes('blob string failure'))).toBe(true);
   });
 });

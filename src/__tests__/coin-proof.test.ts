@@ -276,6 +276,27 @@ describe('CoinProof semantic validation', () => {
       ),
     ).toThrow(/must not carry cap_total/);
 
+    // Independently cover the terms_salt-only v1 rejection arm.
+    expect(() =>
+      serializeCoinProof(
+        sampleCoinProof(130, {
+          coin: {
+            identifier: digestLabel('id/v1salt'),
+            recipient: digestLabel('r/v1salt'),
+            amount: 1n,
+            assetId: digestToBytes(assetIdV1(GENESIS_TAG, creator, nameHash, 2, 1)),
+          },
+          assetTerms: {
+            creatorPubkey: creator,
+            decimals: 2,
+            issuanceVersion: 1,
+            name,
+            termsSalt,
+          },
+        }),
+      ),
+    ).toThrow(/must not carry cap_total/);
+
     // v2 missing cap/salt on write.
     expect(() =>
       serializeCoinProof(
@@ -295,6 +316,35 @@ describe('CoinProof semantic validation', () => {
         }),
       ),
     ).toThrow(/requires cap_total/);
+
+    // cap_total present with missing terms_salt reaches the second v2 guard operand.
+    expect(() =>
+      serializeCoinProof(
+        sampleCoinProof(160, {
+          coin: {
+            identifier: digestLabel('id/v2salt-missing'),
+            recipient: digestLabel('r/v2salt-missing'),
+            amount: 1n,
+            assetId,
+          },
+          assetTerms: {
+            creatorPubkey: creator,
+            decimals: 8,
+            issuanceVersion: 2,
+            name,
+            capTotal,
+          },
+        }),
+      ),
+    ).toThrow(/requires cap_total/);
+
+    expect(() =>
+      assertAssetIdMatchesTerms(cp.coin, {
+        ...terms,
+        issuanceVersion: 2,
+        termsSalt: undefined,
+      }),
+    ).toThrow(/missing cap_total/);
 
     // invalid issuance version on write.
     expect(() =>

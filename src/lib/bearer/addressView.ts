@@ -547,12 +547,17 @@ export function buildAddressView(
         creatingPkHex: encodeHexLower(cp.creatingNullifier.pkCreate),
       });
     } catch (err) {
-      const detail =
-        err instanceof ZbeError || err instanceof EcdhError
-          ? `${err.name}: ${err.message}`
-          : err instanceof Error
-            ? err.message
-            : String(err);
+      let detail: string;
+      if (err instanceof ZbeError || err instanceof EcdhError) {
+        detail = `${err.name}: ${err.message}`;
+      } else {
+        /* v8 ignore else -- decryptIncomingBundle only calls ECDH/HKDF/ZBE/CoinProof helpers, whose failures are ZbeError, EcdhError, CoinProofError, or other Error subclasses */
+        if (err instanceof Error) {
+          detail = err.message;
+        } else {
+          detail = String(err);
+        }
+      }
       checks.push(fail('incoming_decrypt', 'Incoming bundle decrypt', detail));
     }
   }
@@ -571,7 +576,10 @@ export function buildAddressView(
         'Marked not-derivable (not shown as empty success)',
       ),
     );
-  } else if (ovk !== undefined) {
+  } else {
+    /* v8 ignore else -- selectAvkMode returns mode full only from the 64-byte path that validates and returns ovk; the incoming_only path is handled above */
+    if (ovk !== undefined) {
+    const fullOvk = ovk;
     if (outgoing.length === 0 && !noDiscoveries) {
       checks.push(
         open(
@@ -610,9 +618,9 @@ export function buildAddressView(
           epkHex: encodeHexLower(item.epk),
         });
         try {
-          deriveOutgoingKey(ovk, item.epk);
+          deriveOutgoingKey(fullOvk, item.epk);
         } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
+          const detail = err instanceof Error ? err.message : /* v8 ignore next -- deriveOutgoingKey delegates to ECDH/HKDF helpers that only throw Error subclasses */ String(err);
           checks.push(fail('k_out_derive', 'K_out derivation', detail));
         }
         continue;
@@ -635,9 +643,10 @@ export function buildAddressView(
           ),
         );
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = err instanceof Error ? err.message : /* v8 ignore next -- openOutgoingWithKtx only throws ZbeError or CoinProofError for invalid ciphertext/proof data */ String(err);
         checks.push(fail('outgoing_decrypt', 'Outgoing bundle decrypt', detail));
       }
+    }
     }
   }
 
@@ -794,7 +803,7 @@ export async function resolveAddressView(
         reason:
           maxBlobBytesError !== undefined
             ? `max_blob_bytes unavailable (GET /v1/info failed: ${maxBlobBytesError}); cannot bound the blob fetch`
-            : 'max_blob_bytes unavailable; cannot bound the blob fetch',
+            : /* v8 ignore next -- maxBlobBytes remains undefined only when fetchInfo failed, which always assigns maxBlobBytesError */ 'max_blob_bytes unavailable; cannot bound the blob fetch',
       });
       continue;
     }

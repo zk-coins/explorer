@@ -195,14 +195,16 @@ describe('ZBE §4.2.1', () => {
   it('rejects wrong magic', () => {
     const k = testKtx();
     const { ciphertext } = zbeSeal(k, new TextEncoder().encode('x'));
-    const bad = ciphertext.slice();
-    bad[0] = 0x58; // 'X'
-    try {
-      zbeOpen(k, bad);
-      expect.fail('expected wrong_magic');
-    } catch (err) {
-      expect(err).toBeInstanceOf(ZbeError);
-      expect((err as ZbeError).code).toBe('wrong_magic');
+    for (let i = 0; i < ZBE_MAGIC.length; i++) {
+      const bad = ciphertext.slice();
+      bad[i]! ^= 0xff;
+      try {
+        zbeOpen(k, bad);
+        expect.fail('expected wrong_magic');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ZbeError);
+        expect((err as ZbeError).code).toBe('wrong_magic');
+      }
     }
   });
 
@@ -233,6 +235,9 @@ describe('ZBE §4.2.1', () => {
   it('rejects bad key length, non-Uint8Array plaintext/ciphertext, truncated framing', () => {
     expect(() => zbeSeal(new Uint8Array(16), new Uint8Array(1))).toThrow(ZbeError);
     expect(() => zbeOpen(new Uint8Array(16), new Uint8Array(20))).toThrow(ZbeError);
+    expect(() => zbeSeal('bad-key' as unknown as Uint8Array, new Uint8Array(1))).toThrow(
+      /got string/,
+    );
     expect(() => zbeSeal(testKtx(), 'not-bytes' as unknown as Uint8Array)).toThrow(
       /plaintext must be a Uint8Array/,
     );
@@ -289,6 +294,7 @@ describe('ZBE §4.2.1', () => {
   it('zbeNonce out of range; verifyBlobId wrong length', () => {
     expect(() => zbeNonce(-1)).toThrow(/u32 range/);
     expect(() => zbeNonce(1.5)).toThrow(/u32 range/);
+    expect(() => zbeNonce(0x1_0000_0000)).toThrow(/u32 range/);
     expect(() => verifyBlobId(new Uint8Array(1), new Uint8Array(16))).toThrow(/32 bytes/);
   });
 });

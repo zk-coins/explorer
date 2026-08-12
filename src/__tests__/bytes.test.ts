@@ -63,6 +63,7 @@ describe('crypto/bytes', () => {
   });
 
   it('base64UrlDecodedLength empty/non-alphabet/mod1 and mod branches', () => {
+    expect(() => base64UrlDecodedLength(7 as unknown as string)).toThrow(/empty/);
     expect(() => base64UrlDecodedLength('')).toThrow(/empty/);
     expect(() => base64UrlDecodedLength('!!!')).toThrow(/non-alphabet/);
     expect(() => base64UrlDecodedLength('a')).toThrow(/invalid length/);
@@ -74,9 +75,16 @@ describe('crypto/bytes', () => {
   });
 
   it('base64UrlDecodeNoPad happy path and validation', () => {
+    expect(() => base64UrlDecodeNoPad(7 as unknown as string)).toThrow(/empty/);
     expect(() => base64UrlDecodeNoPad('')).toThrow(/empty/);
     expect(() => base64UrlDecodeNoPad('!!!')).toThrow(/non-alphabet/);
     expect(() => base64UrlDecodeNoPad('YWJj', { maxDecodedBytes: 0 })).toThrow(/maxDecodedBytes/);
+    expect(() => base64UrlDecodeNoPad('YWJj', { maxDecodedBytes: 1.5 })).toThrow(
+      /maxDecodedBytes/,
+    );
+    expect(() =>
+      base64UrlDecodeNoPad('YWJj', { maxDecodedBytes: Number.MAX_SAFE_INTEGER + 1 }),
+    ).toThrow(/maxDecodedBytes/);
     expect(() => base64UrlDecodeNoPad('YWJj', { maxDecodedBytes: 2 })).toThrow(/exceeds max/);
     const encoded = base64UrlEncodeNoPad(new Uint8Array([1, 2, 3, 4]));
     expect(base64UrlDecodeNoPad(encoded)).toEqual(new Uint8Array([1, 2, 3, 4]));

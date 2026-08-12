@@ -55,7 +55,11 @@ export async function readArrayBufferLimited(
       );
     }
     const cl = Number(clHeader);
-    if (!Number.isSafeInteger(cl) || cl < 0) {
+    if (
+      !Number.isSafeInteger(cl) ||
+      /* v8 ignore next -- the digits-only Content-Length regex above cannot produce a negative Number */
+      cl < 0
+    ) {
       throw new NodeApiError(
         res.status,
         'malformed_response',

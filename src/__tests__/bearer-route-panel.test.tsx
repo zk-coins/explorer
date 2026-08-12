@@ -168,6 +168,26 @@ describe('BearerRoutePanel', () => {
     });
   });
 
+  it('tx: unmount suppresses a late rejection', async () => {
+    const bundle = encodeBech32m(EXPLORER_HRPS.zkbid, p(32, 1));
+    const viewKey = encodeBech32m(EXPLORER_HRPS.zkview, p(32, 2));
+    await setHash(`#${bundle}/${viewKey}`);
+    let reject!: (reason?: unknown) => void;
+    resolveConfirmationLink.mockImplementation(
+      () =>
+        new Promise((_, r) => {
+          reject = r;
+        }),
+    );
+    const { unmount } = render(<BearerRoutePanel kind="tx" />);
+    await waitFor(() => expect(screen.getByText(/Decrypting confirmation/)).toBeTruthy());
+    unmount();
+    await act(async () => {
+      reject('late tx failure');
+    });
+    expect(screen.queryByTestId('error-state')).toBeNull();
+  });
+
   it('tx: hashchange re-parses', async () => {
     await setHash('');
     resolveConfirmationLink.mockResolvedValue({ checks: [] });
@@ -247,6 +267,49 @@ describe('BearerRoutePanel', () => {
     await waitFor(() => {
       expect(screen.getByTestId('error-state').textContent).toMatch(/bal fail/);
     });
+  });
+
+  it('balance: non-Error rejection is rendered', async () => {
+    const address = encodeBech32m(EXPLORER_HRPS.zk, p(32, 5));
+    const assetId = 'ab'.repeat(32);
+    const inline = base64UrlEncodeNoPad(fill(32, 9));
+    await setHash(`#${address}/${assetId}/i:${inline}`);
+    resolveBalanceAttestation.mockRejectedValue('balance string failure');
+    render(<BearerRoutePanel kind="balance" />);
+    await waitFor(() => {
+      expect(screen.getByTestId('error-state').textContent).toMatch(/balance string failure/);
+    });
+  });
+
+  it('balance: unmount suppresses late resolution and rejection', async () => {
+    const address = encodeBech32m(EXPLORER_HRPS.zk, p(32, 5));
+    const assetId = 'ab'.repeat(32);
+    const inline = base64UrlEncodeNoPad(fill(32, 9));
+    await setHash(`#${address}/${assetId}/i:${inline}`);
+    let settle!: (value?: unknown) => void;
+    resolveBalanceAttestation.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const first = render(<BearerRoutePanel kind="balance" />);
+    await waitFor(() => expect(screen.getByText(/Verifying balance attestation/)).toBeTruthy());
+    first.unmount();
+    await act(async () => settle({ checks: [] }));
+
+    await setHash(`#${address}/${assetId}/i:${inline}`);
+    resolveBalanceAttestation.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          settle = reject;
+        }),
+    );
+    const second = render(<BearerRoutePanel kind="balance" />);
+    await waitFor(() => expect(screen.getByText(/Verifying balance attestation/)).toBeTruthy());
+    second.unmount();
+    await act(async () => settle('late balance failure'));
+    expect(screen.queryByTestId('error-state')).toBeNull();
   });
 
   it('addr: empty, invalid, loading, full history variants, reject', async () => {
@@ -360,5 +423,46 @@ describe('BearerRoutePanel', () => {
     await waitFor(() => {
       expect(screen.getByTestId('error-state').textContent).toMatch(/addr fail/);
     });
+  });
+
+  it('addr: incoming-only non-Error rejection uses the incoming fallback mode', async () => {
+    const address = encodeBech32m(EXPLORER_HRPS.zk, p(32, 3));
+    const avk = encodeBech32m(EXPLORER_HRPS.zkavk, p(32, 4));
+    await setHash(`#${address}/${avk}`);
+    resolveAddressView.mockRejectedValue('address string failure');
+    render(<BearerRoutePanel kind="addr" />);
+    await waitFor(() => expect(screen.getByTestId('address-view')).toBeTruthy());
+    expect(screen.getByTestId('avk-mode').textContent).toMatch(/incoming-only/);
+    expect(screen.getByTestId('error-state').textContent).toMatch(/address string failure/);
+  });
+
+  it('addr: unmount suppresses late resolution and rejection', async () => {
+    const address = encodeBech32m(EXPLORER_HRPS.zk, p(32, 3));
+    const avk = encodeBech32m(EXPLORER_HRPS.zkavk, p(64, 4));
+    await setHash(`#${address}/${avk}`);
+    let settle!: (value?: unknown) => void;
+    resolveAddressView.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const first = render(<BearerRoutePanel kind="addr" />);
+    await waitFor(() => expect(screen.getByText(/Opening account view/)).toBeTruthy());
+    first.unmount();
+    await act(async () => settle({ mode: 'full', addressHex: '', checks: [], history: [] }));
+
+    await setHash(`#${address}/${avk}`);
+    resolveAddressView.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          settle = reject;
+        }),
+    );
+    const second = render(<BearerRoutePanel kind="addr" />);
+    await waitFor(() => expect(screen.getByText(/Opening account view/)).toBeTruthy());
+    second.unmount();
+    await act(async () => settle('late address failure'));
+    expect(screen.queryByTestId('error-state')).toBeNull();
   });
 });

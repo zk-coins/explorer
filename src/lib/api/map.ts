@@ -178,7 +178,17 @@ export function computeAggregateCounts(
   }
   const transitions_per_block = Array.from(byHeight.entries())
     .map(([height, transitions]) => ({ height, transitions }))
-    .sort((a, b) => (a.height < b.height ? -1 : a.height > b.height ? 1 : 0));
+    .sort((a, b) => {
+      if (a.height < b.height) {
+        return -1;
+      }
+      /* v8 ignore else -- byHeight is a Map keyed by height, so distinct entries passed to the comparator have unique height values and cannot reach equality */
+      if (a.height > b.height) {
+        return 1;
+      } else {
+        return 0;
+      }
+    });
 
   return {
     inscription_count: inscriptions.length,

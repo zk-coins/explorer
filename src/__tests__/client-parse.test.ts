@@ -72,6 +72,30 @@ describe('client parsers and fetchNullifier', () => {
           }) as unknown as Response,
       }),
     ).rejects.toMatchObject({ code: 'malformed_response' });
+
+    await expect(
+      fetchInfo({
+        baseUrl: 'https://n.example',
+        fetchImpl: async () => {
+          throw new Error('error-object-down');
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'network_error', message: expect.stringMatching(/error-object/) });
+  });
+
+  it('getJson keeps status defaults for empty or non-string error fields', async () => {
+    for (const body of [
+      { error: '', message: '' },
+      { error: 17, message: { nested: true } },
+    ]) {
+      await expect(
+        fetchInfo({
+          baseUrl: 'https://n.example',
+          fetchImpl: async () =>
+            ({ ok: false, status: 418, json: async () => body }) as unknown as Response,
+        }),
+      ).rejects.toMatchObject({ code: 'http_error', message: 'HTTP 418' });
+    }
   });
 
   it('parseInfoResponse rejects unknown network, zero max_blob_bytes, non-string features', () => {
@@ -241,6 +265,20 @@ describe('client parsers and fetchNullifier', () => {
     ).toThrow(/audit_path longer than 64/);
   });
 
+  it('parseNullifierLookupResponse accepts an absent nullifier without member fields', () => {
+    const parsed = parseNullifierLookupResponse({
+      present: false,
+      audit_path: [],
+      tree_size: '1',
+      root: HEX32,
+      tip_block_hash: HEX32,
+      tip_height: '2',
+    });
+    expect(parsed.present).toBe(false);
+    expect(parsed.position).toBeUndefined();
+    expect(parsed.leaf).toBeUndefined();
+  });
+
   it('parseAccumulatorResponse rejects non-object', () => {
     expect(() => parseAccumulatorResponse(null)).toThrow(/not an object/);
   });
@@ -269,12 +307,24 @@ describe('client parsers and fetchNullifier', () => {
   });
 
   it('require field helpers surface via parseInfoResponse', () => {
+    expect(() => parseInfoResponse({ ...FIXTURE_INFO_RAW, protocol_version: 7 })).toThrow(
+      /empty string/,
+    );
     expect(() => parseInfoResponse({ ...FIXTURE_INFO_RAW, protocol_version: '' })).toThrow(
       /empty string/,
     );
     expect(() => parseInfoResponse({ ...FIXTURE_INFO_RAW, finality_confirmations: -1 })).toThrow(
       /non-negative safe integer/,
     );
+    expect(() => parseInfoResponse({ ...FIXTURE_INFO_RAW, finality_confirmations: 1.5 })).toThrow(
+      /non-negative safe integer/,
+    );
+    expect(() =>
+      parseInfoResponse({
+        ...FIXTURE_INFO_RAW,
+        finality_confirmations: Number.MAX_SAFE_INTEGER + 1,
+      }),
+    ).toThrow(/non-negative safe integer/);
     expect(() =>
       parseInfoResponse({ ...FIXTURE_INFO_RAW, finality_confirmations: 0x1_0000_0000 }),
     ).toThrow(/exceeds max/);
@@ -338,5 +388,19 @@ describe('client parsers and fetchNullifier', () => {
     expect(seen).toMatch(/from_tx_index=2/);
     expect(seen).toMatch(/from_vin_index=3/);
     expect(seen).toMatch(/limit=10/);
+
+    let bareSeen = '';
+    await fetchInscriptions({
+      baseUrl: 'https://n.example',
+      fetchImpl: async (url) => {
+        bareSeen = String(url);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ inscriptions: [] }),
+        } as unknown as Response;
+      },
+    });
+    expect(bareSeen).toMatch(/\/v1\/chain\/inscriptions$/);
   });
 });

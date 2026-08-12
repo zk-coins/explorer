@@ -63,6 +63,11 @@ describe('Bech32m HRP parsing (§1.4 / §1.7.7)', () => {
     expect(Array.from(out)).toEqual(Array.from(p));
   });
 
+  it('encodes payloads whose 8-to-5 conversion has no remaining bits', () => {
+    const p = payload(5, 0x5a);
+    expect(decodeBech32m(encodeBech32m('raw', p)).payload).toEqual(p);
+  });
+
   it('rejects wrong HRP for zkview (e.g. zkbid presented as view)', () => {
     const encoded = encodeBech32m(EXPLORER_HRPS.zkbid, payload(32));
     expect(() => decodeExplorerBech32m(encoded, EXPLORER_HRPS.zkview, [32])).toThrow(Bech32mError);
@@ -97,6 +102,7 @@ describe('Bech32m HRP parsing (§1.4 / §1.7.7)', () => {
   });
 
   it('rejects empty input and missing separator', () => {
+    expect(() => decodeBech32m(7 as unknown as string)).toThrow(/empty/);
     expect(() => decodeBech32m('')).toThrow(/empty/);
     expect(() => decodeBech32m('no_separator_here')).toThrow(/separator/);
     // Separator too late / insufficient checksum room.
@@ -184,15 +190,24 @@ describe('Bech32m HRP parsing (§1.4 / §1.7.7)', () => {
       for (let i = 0; i < hrp.length; i++) ret.push(hrp.charCodeAt(i) & 31);
       return ret;
     }
-    const hrp = 'a';
-    // One data word with value 1 → leftover bits non-zero after 5→8.
-    const data = [1];
-    const values = hrpExpand(hrp).concat(data).concat([0, 0, 0, 0, 0, 0]);
-    const mod = polymod(values) ^ 0x2bc830a3;
-    const checksum: number[] = [];
-    for (let p = 0; p < 6; p++) checksum.push((mod >>> (5 * (5 - p))) & 31);
-    let s = `${hrp}1`;
-    for (const d of data.concat(checksum)) s += CHARSET[d]!;
-    expect(() => decodeBech32m(s)).toThrow(/non-canonical Bech32m padding/);
+    const checked = (data: number[]): string => {
+      const hrp = 'a';
+      const values = hrpExpand(hrp).concat(data).concat([0, 0, 0, 0, 0, 0]);
+      const mod = polymod(values) ^ 0x2bc830a3;
+      const checksum: number[] = [];
+      for (let p = 0; p < 6; p++) checksum.push((mod >>> (5 * (5 - p))) & 31);
+      let s = `${hrp}1`;
+      for (const d of data.concat(checksum)) s += CHARSET[d]!;
+      return s;
+    };
+    // First form leaves five bits (bits >= from); second leaves two non-zero bits.
+    expect(() => decodeBech32m(checked([1]))).toThrow(/non-canonical Bech32m padding/);
+    expect(() => decodeBech32m(checked([0, 1]))).toThrow(/non-canonical Bech32m padding/);
+  });
+
+  it('accepts all-uppercase Bech32m and rejects a non-string HRP', () => {
+    const encoded = encodeBech32m(EXPLORER_HRPS.zkview, payload(32));
+    expect(decodeBech32m(encoded.toUpperCase()).payload).toEqual(payload(32));
+    expect(() => encodeBech32m(7 as unknown as string, payload(1))).toThrow(/HRP is required/);
   });
 });

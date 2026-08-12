@@ -2,7 +2,7 @@
  * Blossom fetch + multi-holder fallback paths.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fetchBlossomBlob, fetchBlossomBlobFromHolders } from '@/lib/api/blossom';
 import { NodeApiError } from '@/lib/api/types';
 import { sha256 } from '@/lib/crypto/sha256';
@@ -21,6 +21,10 @@ function mockResponse(body: Uint8Array, init: { ok?: boolean; status?: number } 
 describe('blossom fetch', () => {
   const payload = new Uint8Array([1, 2, 3, 4, 5]);
   const blobId = sha256(payload);
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
 
   it('rejects empty baseUrl override', async () => {
     await expect(
@@ -49,6 +53,23 @@ describe('blossom fetch', () => {
         fetchImpl: async () => mockResponse(payload),
       }),
     ).rejects.toThrow(/32 bytes/);
+
+    await expect(
+      fetchBlossomBlob('not-bytes' as unknown as Uint8Array, {
+        baseUrl: 'https://h.example',
+        maxBlobBytes: 1024,
+        fetchImpl: async () => mockResponse(payload),
+      }),
+    ).rejects.toThrow(/got string/);
+  });
+
+  it('uses global fetch when fetchImpl is omitted', async () => {
+    const fetchImpl = vi.fn(async () => mockResponse(payload));
+    vi.stubGlobal('fetch', fetchImpl);
+    await expect(
+      fetchBlossomBlob(blobId, { baseUrl: 'https://h.example', maxBlobBytes: 1024 }),
+    ).resolves.toEqual(payload);
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
   it('rewrapping invalid maxBlobBytes', async () => {
@@ -71,6 +92,16 @@ describe('blossom fetch', () => {
         },
       }),
     ).rejects.toMatchObject({ code: 'network_error' });
+
+    await expect(
+      fetchBlossomBlob(blobId, {
+        baseUrl: 'https://h.example',
+        maxBlobBytes: 1024,
+        fetchImpl: async () => {
+          throw 'offline string';
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'network_error', message: expect.stringMatching(/offline/) });
   });
 
   it('rejects non-ok HTTP and blob_id mismatch', async () => {
@@ -141,17 +172,17 @@ describe('blossom fetch', () => {
       }),
     ).rejects.toBeInstanceOf(NodeApiError);
 
-    // All fail with non-Error throw → generic message.
+    // A non-Error escaping after the fetch call reaches the generic fallback.
     await expect(
       fetchBlossomBlobFromHolders(blobId, ['https://a.example'], {
         maxBlobBytes: 1024,
-        fetchImpl: async () => {
-          // Force non-Error lastErr by throwing a string from u64 path is hard;
-          // instead make blobId wrong type path... use a custom throw that isn't Error
-          // after failing the read — network path wraps to Error. Direct approach:
-          throw 'plain-string-fail';
-        },
+        fetchImpl: async () =>
+          Object.defineProperty({}, 'ok', {
+            get() {
+              throw 'plain-string-fail';
+            },
+          }) as Response,
       }),
-    ).rejects.toThrow(/plain-string-fail|all holders failed|Failed to fetch/);
+    ).rejects.toThrow('fetchBlossomBlobFromHolders: all holders failed');
   });
 });

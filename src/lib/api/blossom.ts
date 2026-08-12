@@ -55,7 +55,7 @@ export async function fetchBlossomBlob(
   try {
     maxBlobBytes = u64ToSafeByteLimit(opts.maxBlobBytes, 'fetchBlossomBlob.maxBlobBytes');
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+    const detail = err instanceof Error ? err.message : /* v8 ignore next -- u64ToSafeByteLimit rejects invalid numeric inputs exclusively with Error instances */ String(err);
     throw new Error(`fetchBlossomBlob: maxBlobBytes invalid: ${detail}`);
   }
   const hex = encodeHexLower(blobId);
@@ -119,6 +119,5 @@ export async function fetchBlossomBlobFromHolders(
   if (lastErr instanceof Error) {
     throw lastErr;
   }
-  /* v8 ignore next 1 -- fetchBlossomBlob only throws Error subclasses; non-Error lastErr is unreachable */
   throw new Error('fetchBlossomBlobFromHolders: all holders failed');
 }

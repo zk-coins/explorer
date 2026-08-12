@@ -155,6 +155,17 @@ describe('body limit (max_blob_bytes)', () => {
       'fallback-cl-ok',
     );
     expect(matchedCl).toEqual(expected);
+
+    const bodyWithoutReader = {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      body: {},
+      arrayBuffer: async () => expected.buffer.slice(0),
+    } as unknown as Response;
+    expect(await readArrayBufferLimited(bodyWithoutReader, 100, 'fallback-no-reader')).toEqual(
+      expected,
+    );
   });
 
   it('skips undefined stream values and accepts matching CL', async () => {
@@ -177,6 +188,15 @@ describe('body limit (max_blob_bytes)', () => {
     } as unknown as Response;
     const got = await readArrayBufferLimited(res, 100, 'test');
     expect(got).toEqual(new Uint8Array([1, 2]));
+  });
+
+  it('accepts an in-limit stream without Content-Length', async () => {
+    const got = await readArrayBufferLimited(
+      fakeRes({ chunks: [new Uint8Array([1]), new Uint8Array([2, 3])] }),
+      3,
+      'chunked',
+    );
+    expect(got).toEqual(new Uint8Array([1, 2, 3]));
   });
 
   it('accepts a body within the limit', async () => {

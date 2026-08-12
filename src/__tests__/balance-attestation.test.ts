@@ -13,7 +13,7 @@ import { resolveBalanceAttestation, verifyBalanceAttestationBytes } from '@/lib/
 import { base64UrlEncodeNoPad, encodeHexLower, writeU32Be } from '@/lib/crypto/bytes';
 import { sha256 } from '@/lib/crypto/sha256';
 import type { BalanceFragmentOk } from '@/lib/fragments';
-import { digestToBytes, networkIdRegtest } from '@zkcoins/sdk';
+import { digestToBytes, networkIdRegtest, networkIdTestnet } from '@zkcoins/sdk';
 
 function fill(n: number, v: number): Uint8Array {
   return Uint8Array.from({ length: n }, () => v);
@@ -187,6 +187,17 @@ describe('§5.7 balance attestation', () => {
     expect(openNet.checks.find((c) => c.id === 'network_id')?.status).toBe('open');
   });
 
+  it('matches the testnet network id', () => {
+    const att = sampleAttestation();
+    att.networkId = digestToBytes(networkIdTestnet());
+    const view = verifyBalanceAttestationBytes(
+      serializeBalanceAttestationV1(att),
+      fragmentFor(att),
+      { network: 'testnet' },
+    );
+    expect(view.checks.find((c) => c.id === 'network_id')?.status).toBe('pass');
+  });
+
   it('serializes empty proof', () => {
     const att = sampleAttestation();
     att.proof = new Uint8Array(0);
@@ -306,6 +317,49 @@ describe('§5.7 balance attestation', () => {
       },
     });
     expect(failed.checks.find((c) => c.id === 'anchor_path_b')?.detail).toMatch(/nf down/);
+
+    const nonError = await resolveBalanceAttestation(frag, {
+      network: 'regtest',
+      maxBlobBytes: 1_000_000,
+      fetchNullifier: async () => {
+        throw 'nf string failure';
+      },
+    });
+    expect(nonError.checks.find((c) => c.id === 'anchor_path_b')?.detail).toMatch(
+      /nf string failure/,
+    );
+  });
+
+  it('stringifies non-Error info and holder failures', async () => {
+    const att = sampleAttestation();
+    const inline = await resolveBalanceAttestation(fragmentFor(att), {
+      fetchInfo: async () => {
+        throw 'info string failure';
+      },
+    });
+    expect(inline.fatalError).toMatch(/info string failure/);
+
+    const body = serializeBalanceAttestationV1(att);
+    const handle = sha256(body);
+    const holder = await resolveBalanceAttestation(
+      {
+        status: 'ok',
+        kind: 'balance',
+        address: att.subject.slice(),
+        assetIdHex: encodeHexLower(att.assetId),
+        attestationForm: 'handle',
+        attestationHandle: handle,
+        holderHint: 'https://holder.example',
+      },
+      {
+        network: 'regtest',
+        maxBlobBytes: 1_000_000,
+        fetchFromHolders: async () => {
+          throw 'holder string failure';
+        },
+      },
+    );
+    expect(holder.fatalError).toBe('holder string failure');
   });
 
   it('handle form: missing handle, no holders, holders fetch fail, comma holderHint', async () => {
@@ -366,12 +420,15 @@ describe('§5.7 balance attestation', () => {
         assetIdHex: encodeHexLower(att.assetId),
         attestationForm: 'handle',
         attestationHandle: handle,
-        holderHint: 'https://a.example,https://b.example',
+        holderHint: ', https://a.example, ,https://b.example,',
       },
       {
         network: 'regtest',
         maxBlobBytes: 1_000_000,
-        fetchFromHolders: async () => ({ body, holder: 'https://a.example' }),
+        fetchFromHolders: async (_handle, holders) => {
+          expect(holders).toEqual(['https://a.example', 'https://b.example']);
+          return { body, holder: 'https://a.example' };
+        },
         fetchNullifier: async () => ({
           present: false,
           audit_path: [],
@@ -387,6 +444,18 @@ describe('§5.7 balance attestation', () => {
 
   it('inline empty body and decode error on resolve', async () => {
     const att = sampleAttestation();
+    const missing = await resolveBalanceAttestation(
+      {
+        status: 'ok',
+        kind: 'balance',
+        address: att.subject.slice(),
+        assetIdHex: encodeHexLower(att.assetId),
+        attestationForm: 'inline',
+      },
+      { network: 'regtest', maxBlobBytes: 1_000_000 },
+    );
+    expect(missing.fatalError).toMatch(/inline.*missing/);
+
     const empty = await resolveBalanceAttestation(
       {
         status: 'ok',
@@ -412,5 +481,69 @@ describe('§5.7 balance attestation', () => {
       { network: 'regtest', maxBlobBytes: 1_000_000 },
     );
     expect(badB64.checks.find((c) => c.id === 'obtain')?.status).toBe('fail');
+  });
+
+  it('uses default dependencies only through a fully stubbed info request', async () => {
+    const att = sampleAttestation();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      expect(String(input)).toMatch(/\/v1\/info$/);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: '0',
+          max_blob_bytes: '1048576',
+          features: [],
+        }),
+      } as unknown as Response;
+    }) as typeof fetch;
+    try {
+      const view = await resolveBalanceAttestation({
+        ...fragmentFor(att),
+        attestationInline: '!!!',
+      });
+      expect(view.checks.find((c) => c.id === 'obtain')?.status).toBe('fail');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('stringifies a non-Error base64 decoder failure', async () => {
+    const att = sampleAttestation();
+    const originalAtob = globalThis.atob;
+    globalThis.atob = (() => {
+      throw 'atob string failure';
+    }) as typeof atob;
+    try {
+      const view = await resolveBalanceAttestation(fragmentFor(att), {
+        network: 'regtest',
+        maxBlobBytes: 1_000_000,
+      });
+      expect(view.fatalError).toBe('base64url: decode failed');
+      expect(view.checks.find((c) => c.id === 'obtain')?.status).toBe('fail');
+    } finally {
+      globalThis.atob = originalAtob;
+    }
+  });
+
+  it('stringifies a non-Error inline size-gate failure', async () => {
+    const att = sampleAttestation();
+    const hostileLimit = {
+      [Symbol.toPrimitive]() {
+        throw 'max bytes string failure';
+      },
+    } as unknown as number;
+
+    const view = await resolveBalanceAttestation(fragmentFor(att), {
+      network: 'regtest',
+      maxBlobBytes: hostileLimit,
+    });
+
+    expect(view.fatalError).toBe('max bytes string failure');
+    expect(view.checks.find((c) => c.id === 'obtain')?.detail).toBe('max bytes string failure');
   });
 });

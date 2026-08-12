@@ -225,6 +225,35 @@ describe('Public-mode data mapping (§7.5 → §5.5 view)', () => {
     ]);
   });
 
+  it('computeAggregateCounts sorts descending input and preserves equal-height aggregation', () => {
+    const inscriptions = mapInscriptions(parseInscriptionsResponse(FIXTURE_INSCRIPTIONS_RAW));
+    const counts = computeAggregateCounts([inscriptions[1]!, inscriptions[0]!], 3n);
+    expect(counts.transitions_per_block).toEqual([
+      { height: 100n, transitions: 2 },
+      { height: 101n, transitions: 1 },
+    ]);
+  });
+
+  it('public searchable text omits lookup fields when no lookup was supplied', () => {
+    const text = publicViewToSearchableText({
+      inscriptions: [],
+      accumulator: {
+        size: 0n,
+        nav_root: 'aa'.repeat(32),
+        tip_block_hash: 'bb'.repeat(32),
+        tip_height: 0n,
+      },
+      counts: { inscription_count: 0, transitions_per_block: [], accumulator_size: 0n },
+      info: {
+        network: 'regtest',
+        protocol_version: 'v1',
+        finality_confirmations: 6,
+        activation_height: 0n,
+      },
+    });
+    expect(text).not.toContain('lookup_present=');
+  });
+
   it('InscriptionList empty page and short hex passthrough', () => {
     const emptyCounts = {
       inscription_count: 0,

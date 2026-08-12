@@ -35,16 +35,14 @@ export default defineConfig({
         // end-to-end by the Playwright suite under e2e/.
         'src/app/**',
       ],
-      // Statements/functions/lines are pinned at 100% — the load-bearing
-      // guarantees. Branches follow ../sdk/vitest.config.ts's own precedent
-      // (branches: 85): a small number of defensive dual-state-null checks and
-      // library-invariant guards remain genuinely unreachable without inventing
-      // synthetic tests that assert nothing about real correctness.
+      // Every executable coverage axis is pinned at 100%. Structurally
+      // unreachable library invariants are documented with narrow v8 ignores
+      // at the exact branch rather than weakening the project-wide threshold.
       thresholds: {
         statements: 100,
         functions: 100,
         lines: 100,
-        branches: 85,
+        branches: 100,
       },
     },
   },
