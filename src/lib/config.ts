@@ -24,6 +24,8 @@ function readNodeBaseUrl(): string {
       `NEXT_PUBLIC_NODE_BASE_URL must use http or https protocol, got ${JSON.stringify(raw)}`,
     );
   }
+  // WHATWG rejects empty hosts on http(s) before this check can run.
+  /* v8 ignore next -- empty http(s) host is a parse failure, not a parsed empty hostname */
   if (!parsed.hostname) {
     throw new Error(
       `NEXT_PUBLIC_NODE_BASE_URL hostname must be non-empty, got ${JSON.stringify(raw)}`,
