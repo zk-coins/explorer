@@ -7,6 +7,7 @@
  *   Pk_anchor(32) ‖ R_anchor(32) ‖ network_id(32) ‖ u32-be len(proof) ‖ proof
  */
 
+import { digestFromBytes, liftXOnly } from '@zkcoins/sdk';
 import {
   encodeHexLower,
   readU128Be,
@@ -21,6 +22,36 @@ export class BalanceAttestationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'BalanceAttestationError';
+  }
+}
+
+/** Reject bytes that are not a canonical Poseidon Digest encoding. */
+function requireCanonicalDigest(bytes: Uint8Array, field: string): void {
+  try {
+    digestFromBytes(bytes);
+  } catch (err) {
+    const detail =
+      err instanceof Error
+        ? err.message
+        : /* v8 ignore next -- SDK digestFromBytes only throws Error subclasses for malformed digest bytes */ String(
+            err,
+          );
+    throw new BalanceAttestationError(`${field}: non-canonical digest: ${detail}`);
+  }
+}
+
+/** Reject x-only pubkeys / nonces that do not lift to a secp256k1 point. */
+function requireXOnlyPoint(bytes: Uint8Array, field: string): void {
+  try {
+    liftXOnly(bytes, field);
+  } catch (err) {
+    const detail =
+      err instanceof Error
+        ? err.message
+        : /* v8 ignore next -- SDK liftXOnly only throws Error subclasses for non-liftable x-only bytes */ String(
+            err,
+          );
+    throw new BalanceAttestationError(`${field}: invalid x-only curve point: ${detail}`);
   }
 }
 
@@ -106,6 +137,12 @@ export function deserializeBalanceAttestationV1(bytes: Uint8Array): BalanceAttes
     throw new BalanceAttestationError(`trailing bytes after proof: ${bytes.length - o}`);
   }
 
+  // Semantic checks after width-correct decode (mirrors coinProof.ts).
+  requireCanonicalDigest(assetId, 'asset_id');
+  requireCanonicalDigest(navCeiling, 'nav_ceiling');
+  requireXOnlyPoint(pkAnchor, 'Pk_anchor');
+  requireXOnlyPoint(rAnchor, 'R_anchor');
+
   return {
     subject,
     assetId,
@@ -145,10 +182,6 @@ export function serializeBalanceAttestationV1(att: BalanceAttestationV1): Uint8A
   ];
   let total = 0;
   for (const p of parts) {
-    /* v8 ignore next 3 -- fixed-width fields never empty; empty proof is the only zero-length part */
-    if (p.length === 0 && p !== att.proof) {
-      // empty proof is allowed; other fields must be present via fixed widths above
-    }
     total += p.length;
   }
   const out = new Uint8Array(total);

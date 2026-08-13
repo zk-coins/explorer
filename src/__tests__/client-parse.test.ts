@@ -80,7 +80,10 @@ describe('client parsers and fetchNullifier', () => {
           throw new Error('error-object-down');
         },
       }),
-    ).rejects.toMatchObject({ code: 'network_error', message: expect.stringMatching(/error-object/) });
+    ).rejects.toMatchObject({
+      code: 'network_error',
+      message: expect.stringMatching(/error-object/),
+    });
   });
 
   it('getJson keeps status defaults for empty or non-string error fields', async () => {
@@ -96,6 +99,32 @@ describe('client parsers and fetchNullifier', () => {
         }),
       ).rejects.toMatchObject({ code: 'http_error', message: 'HTTP 418' });
     }
+  });
+
+  it('getJson rejects reserved error codes from non-ok HTTP bodies', async () => {
+    await expect(
+      fetchInfo({
+        baseUrl: 'https://n.example',
+        fetchImpl: async () =>
+          ({
+            ok: false,
+            status: 503,
+            json: async () => ({ error: 'malformed_response', message: 'spoof' }),
+          }) as unknown as Response,
+      }),
+    ).rejects.toMatchObject({ code: 'http_error', message: 'spoof' });
+
+    await expect(
+      fetchInfo({
+        baseUrl: 'https://n.example',
+        fetchImpl: async () =>
+          ({
+            ok: false,
+            status: 503,
+            json: async () => ({ error: 'blob_gone' }),
+          }) as unknown as Response,
+      }),
+    ).rejects.toMatchObject({ code: 'blob_gone' });
   });
 
   it('parseInfoResponse rejects unknown network, zero max_blob_bytes, non-string features', () => {
@@ -277,6 +306,87 @@ describe('client parsers and fetchNullifier', () => {
     expect(parsed.present).toBe(false);
     expect(parsed.position).toBeUndefined();
     expect(parsed.leaf).toBeUndefined();
+  });
+
+  it('parseNullifierLookupResponse rejects impossible present membership', () => {
+    const basePresent = {
+      present: true as const,
+      position: '0',
+      leaf: HEX32,
+      audit_path: [] as string[],
+      root: HEX32,
+      tip_block_hash: HEX32,
+      tip_height: '1',
+    };
+    expect(() => parseNullifierLookupResponse({ ...basePresent, tree_size: '0' })).toThrow(
+      /malformed_response|tree_size|position/,
+    );
+    expect(() =>
+      parseNullifierLookupResponse({
+        ...basePresent,
+        position: '3',
+        tree_size: '3',
+        audit_path: [HEX32],
+      }),
+    ).toThrow(/malformed_response|tree_size|position/);
+    expect(() =>
+      parseNullifierLookupResponse({
+        ...basePresent,
+        position: '5',
+        tree_size: '3',
+        audit_path: [HEX32],
+      }),
+    ).toThrow(/malformed_response|tree_size|position/);
+
+    // present:true, tree_size 1, non-empty audit_path is structurally impossible.
+    expect(() =>
+      parseNullifierLookupResponse({
+        ...basePresent,
+        tree_size: '1',
+        audit_path: [HEX32],
+      }),
+    ).toThrow(/malformed_response|audit_path|tree_size/);
+
+    // present:true, tree_size > 1, empty audit_path is structurally impossible.
+    expect(() =>
+      parseNullifierLookupResponse({
+        ...basePresent,
+        tree_size: '2',
+        audit_path: [],
+      }),
+    ).toThrow(/malformed_response|audit_path|tree_size/);
+    expect(() =>
+      parseNullifierLookupResponse({
+        ...basePresent,
+        tree_size: '3',
+        audit_path: [],
+      }),
+    ).toThrow(/malformed_response|audit_path|tree_size/);
+
+    // present:true, tree_size 1, empty path is structurally possible.
+    const singleLeaf = parseNullifierLookupResponse({
+      ...basePresent,
+      tree_size: '1',
+      audit_path: [],
+    });
+    expect(singleLeaf.present).toBe(true);
+    expect(singleLeaf.tree_size).toBe(1n);
+    expect(singleLeaf.audit_path).toEqual([]);
+
+    // Valid present fixture remains accepted.
+    expect(parseNullifierLookupResponse(FIXTURE_NULLIFIER_PRESENT_RAW).present).toBe(true);
+
+    // present:false with empty tree is not a membership claim.
+    const absentEmpty = parseNullifierLookupResponse({
+      present: false,
+      audit_path: [],
+      tree_size: '0',
+      root: HEX32,
+      tip_block_hash: HEX32,
+      tip_height: '0',
+    });
+    expect(absentEmpty.present).toBe(false);
+    expect(absentEmpty.tree_size).toBe(0n);
   });
 
   it('parseAccumulatorResponse rejects non-object', () => {

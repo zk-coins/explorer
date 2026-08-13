@@ -23,8 +23,10 @@ import { coinToView, deserializeCoinProof, type CoinProof } from '@/lib/bundle/c
 import { bytesEqual, decodeHexExact, encodeHexLower } from '@/lib/crypto/bytes';
 import { EcdhError, sharedSecretReceiver } from '@/lib/crypto/ecdh';
 import { deriveNoteKey, deriveOutKey } from '@/lib/crypto/hkdf';
+import { sha256 } from '@/lib/crypto/sha256';
 import { ZbeError, zbeOpen } from '@/lib/crypto/zbe';
 import { fail, open, pass, type CheckItem } from '@/lib/bearer/checks';
+import { parseHolderLocators } from '@/lib/bearer/httpLocator';
 import type { AddrFragmentOk } from '@/lib/fragments';
 import { schnorr } from '@noble/curves/secp256k1.js';
 
@@ -80,6 +82,12 @@ export interface AddressViewResult {
    * unresolved candidates). UI must not present partial/empty history as complete.
    */
   historyNotResolvable?: boolean;
+  /**
+   * Why history is not fully resolvable. Set only when historyNotResolvable is
+   * true — first matching rule: no_scan | empty_unverified | rejected_candidate
+   * | partial_unresolved.
+   */
+  historyGap?: 'no_scan' | 'empty_unverified' | 'partial_unresolved' | 'rejected_candidate';
   fatalError?: string;
 }
 
@@ -116,6 +124,8 @@ export interface MeshUnresolvedCandidate {
   epkHex: string;
   blobIdHex: string;
   reason: string;
+  /** 'scan' before any detect_tag match; 'matched_candidate' after a match. */
+  stage: 'scan' | 'matched_candidate';
 }
 
 export interface MeshScanResult {
@@ -224,6 +234,7 @@ export function openOutgoingWithKtx(kTx: Uint8Array, zbeCiphertext: Uint8Array):
 export interface DiscoveredIncoming {
   epk: Uint8Array;
   zbeCiphertext: Uint8Array;
+  blobId: Uint8Array;
 }
 
 export interface DiscoveredOutgoing {
@@ -237,28 +248,12 @@ export interface DiscoveredOutgoing {
 
 /**
  * Holder / relay URLs from §5.6 holder-hint form (`@https://…` or comma-joined http bases).
+ * Throws when the hint contains an invalid http(s) locator (fail-closed, no silent filter).
  */
 export function parseMeshUrls(hint: string | undefined): string[] {
-  if (hint === undefined || hint.length === 0) {
-    return [];
-  }
-  if (hint.startsWith('@')) {
-    const url = hint.slice(1);
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      return [url.replace(/\/+$/, '')];
-    }
-    return [];
-  }
-  if (hint.includes(',')) {
-    return hint
-      .split(',')
-      .map((s) => s.trim().replace(/\/+$/, ''))
-      .filter((s) => s.startsWith('http://') || s.startsWith('https://'));
-  }
-  if (hint.startsWith('http://') || hint.startsWith('https://')) {
-    return [hint.replace(/\/+$/, '')];
-  }
-  return [];
+  const parsed = parseHolderLocators(hint);
+  if (parsed.status === 'invalid') throw new Error(parsed.detail);
+  return parsed.status === 'ok' ? parsed.locators : [];
 }
 
 // Deterministic, collision-resistant placeholder for a relay- or item-level scan
@@ -312,6 +307,7 @@ export async function defaultScanMesh(opts: {
         epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
         blobIdHex: '',
         reason: `relay ${relay} produced no usable candidate list (not a detect_tag match — this is a scan-level failure): ${detail}`,
+        stage: 'scan',
       });
       continue;
     }
@@ -323,6 +319,7 @@ export async function defaultScanMesh(opts: {
         epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
         blobIdHex: '',
         reason: `relay ${relay} produced no usable candidate list (not a detect_tag match — this is a scan-level failure): ${detail}`,
+        stage: 'scan',
       });
       continue;
     }
@@ -337,6 +334,7 @@ export async function defaultScanMesh(opts: {
         epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
         blobIdHex: '',
         reason: `relay ${relay} produced no usable candidate list (not a detect_tag match — this is a scan-level failure): ${detail}`,
+        stage: 'scan',
       });
       continue;
     }
@@ -348,6 +346,7 @@ export async function defaultScanMesh(opts: {
         epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
         blobIdHex: '',
         reason: `relay ${relay} produced no usable candidate list (not a detect_tag match — this is a scan-level failure): ${detail}`,
+        stage: 'scan',
       });
       continue;
     }
@@ -359,32 +358,102 @@ export async function defaultScanMesh(opts: {
           blobIdHex: '',
           reason:
             'malformed delivery-event item from relay (not a detect_tag match — this is a scan-level failure): item is not an object',
+          stage: 'scan',
         });
         continue;
       }
       const o = item as Record<string, unknown>;
       try {
-        const epk = decodeHexExact(String(o.epk ?? ''), 32, 'mesh.epk');
-        const detectTagBytes = decodeHexExact(String(o.detect_tag ?? ''), 32, 'mesh.detect_tag');
-        const blobId = decodeHexExact(String(o.blob_id ?? ''), 32, 'mesh.blob_id');
+        if (
+          typeof o.epk !== 'string' ||
+          typeof o.detect_tag !== 'string' ||
+          typeof o.blob_id !== 'string'
+        ) {
+          unresolved.push({
+            side: 'incoming',
+            epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
+            blobIdHex: '',
+            reason:
+              'malformed delivery-event item from relay: epk/detect_tag/blob_id missing or not a string',
+            stage: 'scan',
+          });
+          continue;
+        }
+        const epk = decodeHexExact(o.epk, 32, 'mesh.epk');
+        const detectTagBytes = decodeHexExact(o.detect_tag, 32, 'mesh.detect_tag');
+        const blobId = decodeHexExact(o.blob_id, 32, 'mesh.blob_id');
+
+        let side: 'incoming' | 'outgoing';
+        if (!('side' in o) || o.side === undefined) {
+          side = 'incoming';
+        } else if (o.side === 'incoming' || o.side === 'outgoing') {
+          side = o.side;
+        } else {
+          unresolved.push({
+            side: 'incoming',
+            epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
+            blobIdHex: '',
+            reason: 'malformed delivery-event item from relay: side must be incoming or outgoing',
+            stage: 'scan',
+          });
+          continue;
+        }
+
+        if ('blob_locators' in o && !Array.isArray(o.blob_locators)) {
+          unresolved.push({
+            side,
+            epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
+            blobIdHex: '',
+            reason: 'malformed delivery-event item from relay: blob_locators must be an array',
+            stage: 'scan',
+          });
+          continue;
+        }
+        // Fail-closed: any invalid entry rejects the whole candidate (no silent filter).
         const locators: string[] = [];
         if (Array.isArray(o.blob_locators)) {
-          for (const loc of o.blob_locators) {
-            if (
-              typeof loc === 'string' &&
-              (loc.startsWith('http://') || loc.startsWith('https://'))
-            ) {
-              locators.push(loc.replace(/\/+$/, ''));
+          let invalidAt: number | undefined;
+          for (let i = 0; i < o.blob_locators.length; i++) {
+            const loc = o.blob_locators[i];
+            if (typeof loc !== 'string') {
+              invalidAt = i;
+              break;
             }
+            let parsed: URL;
+            try {
+              parsed = new URL(loc);
+            } catch {
+              invalidAt = i;
+              break;
+            }
+            if (
+              (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+              parsed.hostname.length === 0
+            ) {
+              invalidAt = i;
+              break;
+            }
+            locators.push(loc.replace(/\/+$/, ''));
+          }
+          if (invalidAt !== undefined) {
+            unresolved.push({
+              side,
+              epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
+              blobIdHex: '',
+              reason: `malformed delivery-event item from relay: blob_locators contains an invalid entry at index ${invalidAt}`,
+              stage: 'scan',
+            });
+            continue;
           }
         }
+
         const candidate: MeshDeliveryCandidate = {
           epk,
           detectTag: detectTagBytes,
           blobId,
           blobLocators: locators,
         };
-        if (o.side === 'outgoing') {
+        if (side === 'outgoing') {
           candidate.side = 'outgoing';
           if (typeof o.coin_id === 'string') {
             candidate.coinId = decodeHexExact(o.coin_id, 32, 'mesh.coin_id');
@@ -394,12 +463,19 @@ export async function defaultScanMesh(opts: {
         }
         out.push(candidate);
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        let detail: string;
+        /* v8 ignore else -- decodeHexExact and decode helpers throw Error subclasses */
+        if (err instanceof Error) {
+          detail = err.message;
+        } else {
+          detail = String(err);
+        }
         unresolved.push({
           side: o.side === 'outgoing' ? 'outgoing' : 'incoming',
           epkHex: encodeHexLower(syntheticUnresolvedId(unresolvedSeq++)),
           blobIdHex: '',
           reason: `malformed delivery-event item from relay (not a detect_tag match — this is a scan-level failure): ${detail}`,
+          stage: 'scan',
         });
       }
     }
@@ -497,32 +573,41 @@ export function buildAddressView(
       ),
     );
   } else if (noDiscoveries) {
+    // Gateway list path is not a verified complete mesh scan — empty result stays open.
     checks.push(
-      pass(
+      open(
         'mesh_scan',
         'Nostr mesh scan (detect_tag match)',
-        'Mesh scan completed; no detect_tag matches for this ivk',
+        'Mesh list scan returned no detect_tag matches for this ivk — not a verified complete scan or verified absence of payments',
       ),
     );
   } else {
+    // Discoveries are processable, but the list path is not authenticated as complete.
     checks.push(
-      pass(
+      open(
         'mesh_scan',
         'Nostr mesh scan (detect_tag match)',
-        `Processing ${incoming.length} incoming + ${outgoing.length} outgoing discovered bundle(s)`,
+        `Processing ${incoming.length} incoming + ${outgoing.length} outgoing discovered bundle(s) — mesh list path is not a verified complete scan`,
       ),
     );
   }
 
   for (const [i, u] of unresolvedCandidates.entries()) {
+    const title =
+      u.stage === 'scan'
+        ? 'Mesh scan could not produce a usable candidate'
+        : 'Delivery candidate matched detect_tag but could not be resolved';
     checks.push(
       fail(
         `mesh_unresolved_${u.side}_${u.epkHex.slice(0, 8)}_${i}`,
-        'Delivery candidate matched detect_tag but could not be resolved',
+        title,
         `${u.side} epk=${u.epkHex.slice(0, 16)}… blob=${u.blobIdHex.slice(0, 16)}…: ${u.reason}`,
       ),
     );
   }
+
+  // Binding/decrypt rejections that drop entries must not look like verified-empty history.
+  let bindingOrDecryptRejected = false;
 
   for (const item of incoming) {
     try {
@@ -537,6 +622,40 @@ export function buildAddressView(
             `coin.recipient ${encodeHexLower(cp.coin.recipient)} ≠ ${addressHex}`,
           ),
         );
+        bindingOrDecryptRejected = true;
+        continue;
+      }
+      if (!bytesEqual(sha256(item.zbeCiphertext), item.blobId)) {
+        checks.push(
+          fail(
+            `incoming_${encodeHexLower(cp.coin.identifier).slice(0, 8)}`,
+            'Incoming coin open',
+            `blobId binding failed: SHA-256(zbeCiphertext) ≠ item.blobId (${encodeHexLower(item.blobId)})`,
+          ),
+        );
+        bindingOrDecryptRejected = true;
+        continue;
+      }
+      if (!bytesEqual(cp.epk, item.epk)) {
+        checks.push(
+          fail(
+            `incoming_${encodeHexLower(cp.coin.identifier).slice(0, 8)}`,
+            'Incoming coin open',
+            `epk binding failed: opened ${encodeHexLower(cp.epk)} ≠ item.epk ${encodeHexLower(item.epk)}`,
+          ),
+        );
+        bindingOrDecryptRejected = true;
+        continue;
+      }
+      if (!bytesEqual(cp.detectTag, tag)) {
+        checks.push(
+          fail(
+            `incoming_${encodeHexLower(cp.coin.identifier).slice(0, 8)}`,
+            'Incoming coin open',
+            `detectTag binding failed: opened ${encodeHexLower(cp.detectTag)} ≠ computed ${encodeHexLower(tag)}`,
+          ),
+        );
+        bindingOrDecryptRejected = true;
         continue;
       }
       history.push({
@@ -558,6 +677,7 @@ export function buildAddressView(
           detail = String(err);
         }
       }
+      bindingOrDecryptRejected = true;
       checks.push(fail('incoming_decrypt', 'Incoming bundle decrypt', detail));
     }
   }
@@ -579,74 +699,125 @@ export function buildAddressView(
   } else {
     /* v8 ignore else -- selectAvkMode returns mode full only from the 64-byte path that validates and returns ovk; the incoming_only path is handled above */
     if (ovk !== undefined) {
-    const fullOvk = ovk;
-    if (outgoing.length === 0 && !noDiscoveries) {
-      checks.push(
-        open(
-          'outgoing_recovery',
-          'Outgoing recovery via ovk',
-          'No SelfDeliveryRecord / output_ref material supplied; full mesh recovery of SDRs is an open step',
-        ),
-      );
-    } else if (outgoing.length === 0 && noDiscoveries) {
-      checks.push(
-        open(
-          'outgoing_recovery',
-          'Outgoing recovery via ovk',
-          meshScanned
-            ? 'Mesh scan found no outgoing SDR material for this ovk'
-            : 'Not yet resolvable without mesh discovery / SDR material',
-        ),
-      );
-    }
-    for (const item of outgoing) {
-      if (item.kTx === undefined || item.zbeCiphertext === undefined) {
+      const fullOvk = ovk;
+      if (outgoing.length === 0 && !noDiscoveries) {
         checks.push(
           open(
-            `outgoing_${encodeHexLower(item.coinId).slice(0, 8)}`,
-            'Outgoing coin open',
-            'K_tx recovery needs NIP-44 open of out_ciphertext under K_out; not available for this entry',
+            'outgoing_recovery',
+            'Outgoing recovery via ovk',
+            'No SelfDeliveryRecord / output_ref material supplied; full mesh recovery of SDRs is an open step',
           ),
         );
-        history.push({
-          side: 'outgoing',
-          status: 'unresolved',
-          reason:
-            'K_tx not recovered (NIP-44 open of out_ciphertext under K_out is not performed in this build)',
-          coinIdHex: encodeHexLower(item.coinId),
-          blobIdHex: encodeHexLower(item.blobId),
-          epkHex: encodeHexLower(item.epk),
-        });
-        try {
-          deriveOutgoingKey(fullOvk, item.epk);
-        } catch (err) {
-          const detail = err instanceof Error ? err.message : /* v8 ignore next -- deriveOutgoingKey delegates to ECDH/HKDF helpers that only throw Error subclasses */ String(err);
-          checks.push(fail('k_out_derive', 'K_out derivation', detail));
-        }
-        continue;
-      }
-      try {
-        const cp = openOutgoingWithKtx(item.kTx, item.zbeCiphertext);
-        history.push({
-          side: 'outgoing',
-          status: 'recovered',
-          coin: coinToView(cp.coin),
-          coinIdHex: encodeHexLower(item.coinId),
-          blobIdHex: encodeHexLower(item.blobId),
-          epkHex: encodeHexLower(item.epk),
-        });
+      } else if (outgoing.length === 0 && noDiscoveries) {
         checks.push(
-          pass(
-            `outgoing_${encodeHexLower(item.coinId).slice(0, 8)}`,
-            'Outgoing coin open',
-            `amount=${cp.coin.amount.toString(10)}`,
+          open(
+            'outgoing_recovery',
+            'Outgoing recovery via ovk',
+            meshScanned
+              ? 'Mesh scan found no outgoing SDR material for this ovk'
+              : 'Not yet resolvable without mesh discovery / SDR material',
           ),
         );
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : /* v8 ignore next -- openOutgoingWithKtx only throws ZbeError or CoinProofError for invalid ciphertext/proof data */ String(err);
-        checks.push(fail('outgoing_decrypt', 'Outgoing bundle decrypt', detail));
       }
-    }
+      for (const item of outgoing) {
+        if (item.kTx === undefined || item.zbeCiphertext === undefined) {
+          checks.push(
+            open(
+              `outgoing_${encodeHexLower(item.coinId).slice(0, 8)}`,
+              'Outgoing coin open',
+              'K_tx recovery needs NIP-44 open of out_ciphertext under K_out; not available for this entry',
+            ),
+          );
+          history.push({
+            side: 'outgoing',
+            status: 'unresolved',
+            reason:
+              'K_tx not recovered (NIP-44 open of out_ciphertext under K_out is not performed in this build)',
+            coinIdHex: encodeHexLower(item.coinId),
+            blobIdHex: encodeHexLower(item.blobId),
+            epkHex: encodeHexLower(item.epk),
+          });
+          try {
+            deriveOutgoingKey(fullOvk, item.epk);
+          } catch (err) {
+            const detail =
+              err instanceof Error
+                ? err.message
+                : /* v8 ignore next -- deriveOutgoingKey delegates to ECDH/HKDF helpers that only throw Error subclasses */ String(
+                    err,
+                  );
+            checks.push(fail('k_out_derive', 'K_out derivation', detail));
+          }
+          continue;
+        }
+        try {
+          const cp = openOutgoingWithKtx(item.kTx, item.zbeCiphertext);
+          const checkId = `outgoing_${encodeHexLower(item.coinId).slice(0, 8)}`;
+          if (!bytesEqual(sha256(item.zbeCiphertext), item.blobId)) {
+            checks.push(
+              fail(
+                checkId,
+                'Outgoing coin open',
+                `blobId binding failed: SHA-256(zbeCiphertext) ≠ item.blobId (${encodeHexLower(item.blobId)})`,
+              ),
+            );
+            bindingOrDecryptRejected = true;
+            continue;
+          }
+          if (!bytesEqual(cp.coin.identifier, item.coinId)) {
+            checks.push(
+              fail(
+                checkId,
+                'Outgoing coin open',
+                `coin.identifier binding failed: opened ${encodeHexLower(cp.coin.identifier)} ≠ item.coinId ${encodeHexLower(item.coinId)}`,
+              ),
+            );
+            bindingOrDecryptRejected = true;
+            continue;
+          }
+          if (!bytesEqual(cp.epk, item.epk)) {
+            checks.push(
+              fail(
+                checkId,
+                'Outgoing coin open',
+                `epk binding failed: opened ${encodeHexLower(cp.epk)} ≠ item.epk ${encodeHexLower(item.epk)}`,
+              ),
+            );
+            bindingOrDecryptRejected = true;
+            continue;
+          }
+          const tag = computeDetectTag(ivk, item.epk);
+          if (!bytesEqual(cp.detectTag, tag)) {
+            checks.push(
+              fail(
+                checkId,
+                'Outgoing coin open',
+                `detectTag binding failed: opened ${encodeHexLower(cp.detectTag)} ≠ computed ${encodeHexLower(tag)}`,
+              ),
+            );
+            bindingOrDecryptRejected = true;
+            continue;
+          }
+          history.push({
+            side: 'outgoing',
+            status: 'recovered',
+            coin: coinToView(cp.coin),
+            coinIdHex: encodeHexLower(item.coinId),
+            blobIdHex: encodeHexLower(item.blobId),
+            epkHex: encodeHexLower(item.epk),
+          });
+          checks.push(pass(checkId, 'Outgoing coin open', `amount=${cp.coin.amount.toString(10)}`));
+        } catch (err) {
+          const detail =
+            err instanceof Error
+              ? err.message
+              : /* v8 ignore next -- openOutgoingWithKtx only throws ZbeError or CoinProofError for invalid ciphertext/proof data */ String(
+                  err,
+                );
+          bindingOrDecryptRejected = true;
+          checks.push(fail('outgoing_decrypt', 'Outgoing bundle decrypt', detail));
+        }
+      }
     }
   }
 
@@ -664,8 +835,20 @@ export function buildAddressView(
     checks,
     history,
   };
-  if ((noDiscoveries && !meshScanned) || hasUnresolved) {
+  // Gateway list path is never an authenticated complete scan: empty discovery is not "no payments".
+  // Binding/decrypt rejections likewise leave history incomplete, not verified-empty.
+  if (noDiscoveries || hasUnresolved || bindingOrDecryptRejected) {
     result.historyNotResolvable = true;
+    // First matching rule wins; only set when historyNotResolvable is set.
+    if (noDiscoveries && meshScanned !== true) {
+      result.historyGap = 'no_scan';
+    } else if (noDiscoveries && meshScanned === true && !hasUnresolved) {
+      result.historyGap = 'empty_unverified';
+    } else if (bindingOrDecryptRejected && history.length === 0) {
+      result.historyGap = 'rejected_candidate';
+    } else {
+      result.historyGap = 'partial_unresolved';
+    }
   }
   return result;
 }
@@ -693,7 +876,28 @@ export async function resolveAddressView(
   }
 
   const { mode, ivk } = selectAvkMode(fragment.avk);
-  const relayUrls = parseMeshUrls(fragment.holderHint);
+  let relayUrls: string[];
+  try {
+    relayUrls = parseMeshUrls(fragment.holderHint);
+  } catch (err) {
+    // Invalid holder hint: fail closed before any mesh scan or blob fetch.
+    let detail: string;
+    /* v8 ignore else -- parseMeshUrls throws Error */
+    if (err instanceof Error) {
+      detail = err.message;
+    } else {
+      detail = String(err);
+    }
+    return {
+      mode,
+      addressHex: encodeHexLower(fragment.address),
+      checks: [fail('mesh_scan', 'Nostr mesh scan (detect_tag match)', detail)],
+      history: [],
+      historyNotResolvable: true,
+      historyGap: 'no_scan',
+      fatalError: `mesh scan failed: ${detail}`,
+    };
+  }
   const scanMesh = deps.scanMesh !== undefined ? deps.scanMesh : defaultScanMesh;
   const fetchFromHolders =
     deps.fetchBlobFromHolders !== undefined
@@ -742,6 +946,8 @@ export async function resolveAddressView(
         addressHex: encodeHexLower(fragment.address),
         checks,
         history: [],
+        historyNotResolvable: true,
+        historyGap: 'no_scan',
         fatalError: `mesh scan failed: ${detail}`,
       };
     }
@@ -761,6 +967,7 @@ export async function resolveAddressView(
         epkHex: encodeHexLower(cand.epk),
         blobIdHex: encodeHexLower(cand.blobId),
         reason: 'cannot verify detect_tag for this epk (epk cannot be lifted to a curve point)',
+        stage: 'scan',
       });
       continue;
     }
@@ -776,6 +983,7 @@ export async function resolveAddressView(
           blobIdHex: encodeHexLower(cand.blobId),
           reason:
             'delivery event is missing coin_id; cannot identify the outgoing coin without inventing an id',
+          stage: 'matched_candidate',
         });
         continue;
       }
@@ -791,7 +999,7 @@ export async function resolveAddressView(
 
     // Incoming: fetch ZBE if not already present.
     if (cand.zbeCiphertext !== undefined) {
-      incoming.push({ epk: cand.epk, zbeCiphertext: cand.zbeCiphertext });
+      incoming.push({ epk: cand.epk, zbeCiphertext: cand.zbeCiphertext, blobId: cand.blobId });
       continue;
     }
 
@@ -804,12 +1012,33 @@ export async function resolveAddressView(
           maxBlobBytesError !== undefined
             ? `max_blob_bytes unavailable (GET /v1/info failed: ${maxBlobBytesError}); cannot bound the blob fetch`
             : /* v8 ignore next -- maxBlobBytes remains undefined only when fetchInfo failed, which always assigns maxBlobBytesError */ 'max_blob_bytes unavailable; cannot bound the blob fetch',
+        stage: 'matched_candidate',
       });
       continue;
     }
 
-    const holders =
-      cand.blobLocators.length > 0 ? cand.blobLocators : parseMeshUrls(fragment.holderHint);
+    let holders: string[];
+    try {
+      holders =
+        cand.blobLocators.length > 0 ? cand.blobLocators : parseMeshUrls(fragment.holderHint);
+    } catch (err) {
+      // Invalid fragment holder-hint: never fetch with a filtered remainder list.
+      let detail: string;
+      /* v8 ignore else -- parseMeshUrls throws Error */
+      if (err instanceof Error) {
+        detail = err.message;
+      } else {
+        detail = String(err);
+      }
+      unresolvedCandidates.push({
+        side: 'incoming',
+        epkHex: encodeHexLower(cand.epk),
+        blobIdHex: encodeHexLower(cand.blobId),
+        reason: detail,
+        stage: 'matched_candidate',
+      });
+      continue;
+    }
     if (holders.length === 0) {
       unresolvedCandidates.push({
         side: 'incoming',
@@ -817,6 +1046,7 @@ export async function resolveAddressView(
         blobIdHex: encodeHexLower(cand.blobId),
         reason:
           'no Blossom holder/relay base available for this candidate (blob_locators empty and fragment holder-hint has no http(s) base)',
+        stage: 'matched_candidate',
       });
       continue;
     }
@@ -825,7 +1055,7 @@ export async function resolveAddressView(
         maxBlobBytes,
         signal: deps.signal,
       });
-      incoming.push({ epk: cand.epk, zbeCiphertext: got.body });
+      incoming.push({ epk: cand.epk, zbeCiphertext: got.body, blobId: cand.blobId });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       unresolvedCandidates.push({
@@ -833,6 +1063,7 @@ export async function resolveAddressView(
         epkHex: encodeHexLower(cand.epk),
         blobIdHex: encodeHexLower(cand.blobId),
         reason: `blob fetch failed: ${detail}`,
+        stage: 'matched_candidate',
       });
     }
   }

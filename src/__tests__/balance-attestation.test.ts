@@ -3,6 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { fetchNullifier } from '@/lib/api/client';
 import {
   BalanceAttestationError,
   deserializeBalanceAttestationV1,
@@ -12,8 +13,10 @@ import {
 import { resolveBalanceAttestation, verifyBalanceAttestationBytes } from '@/lib/bearer/balance';
 import { base64UrlEncodeNoPad, encodeHexLower, writeU32Be } from '@/lib/crypto/bytes';
 import { sha256 } from '@/lib/crypto/sha256';
+import type { NetworkTag } from '@/lib/api/types';
 import type { BalanceFragmentOk } from '@/lib/fragments';
 import { digestToBytes, networkIdRegtest, networkIdTestnet } from '@zkcoins/sdk';
+import { xOnlyFromSeed } from './fixtures/crypto';
 
 function fill(n: number, v: number): Uint8Array {
   return Uint8Array.from({ length: n }, () => v);
@@ -29,8 +32,8 @@ function sampleAttestation(): BalanceAttestationV1 {
     txid: fill(32, 0x44),
     blockHash: fill(32, 0x55),
     height: 800_000n,
-    pkAnchor: fill(32, 0x66),
-    rAnchor: fill(32, 0x77),
+    pkAnchor: xOnlyFromSeed(20),
+    rAnchor: xOnlyFromSeed(21),
     networkId: digestToBytes(networkIdRegtest()),
     proof: fill(80, 0x88),
   };
@@ -60,6 +63,10 @@ describe('§5.7 balance attestation', () => {
 
     const byId = Object.fromEntries(view.checks.map((c) => [c.id, c]));
     expect(byId['decode']?.status).toBe('pass');
+    const decodeDetail = view.checks.find((c) => c.id === 'decode')?.detail;
+    expect(decodeDetail).toBeDefined();
+    expect(decodeDetail).not.toContain('balance=');
+    expect(decodeDetail).not.toContain('9000');
     expect(byId['subject_match']?.status).toBe('pass');
     expect(byId['asset_match']?.status).toBe('pass');
     expect(byId['network_id']?.status).toBe('pass');
@@ -80,6 +87,10 @@ describe('§5.7 balance attestation', () => {
     expect(view.fatalError).toBeDefined();
     expect(view.fields).toBeUndefined();
     expect(view.checks.every((c) => !c.detail.includes('9000'))).toBe(true);
+    const decodeDetail = view.checks.find((c) => c.id === 'decode')?.detail;
+    expect(decodeDetail).toBeDefined();
+    expect(decodeDetail).not.toContain('balance=');
+    expect(decodeDetail).not.toContain('9000');
   });
 
   it('fails handle hash mismatch', () => {
@@ -127,6 +138,25 @@ describe('§5.7 balance attestation', () => {
     expect(view.fields).toBeUndefined();
   });
 
+  it('fail-closed when /v1/info omits network (cannot bind network_id)', async () => {
+    const att = sampleAttestation();
+    const frag = fragmentFor(att);
+    const view = await resolveBalanceAttestation(frag, {
+      fetchInfo: async () => ({
+        // runtime-invalid: /v1/info omitted network
+        network: undefined as unknown as NetworkTag,
+        protocol_version: 'v1',
+        finality_confirmations: 6,
+        activation_height: 0n,
+        max_blob_bytes: 1_000_000n,
+        features: [] as string[],
+      }),
+    });
+    expect(view.fatalError).toMatch(/network unresolved after \/v1\/info/);
+    expect(view.fields).toBeUndefined();
+    expect(view.checks.find((c) => c.id === 'network_id')?.status).toBe('fail');
+  });
+
   it('rejects inline body larger than max_blob_bytes before decoding', async () => {
     const att = sampleAttestation();
     const frag = fragmentFor(att);
@@ -166,6 +196,36 @@ describe('§5.7 balance attestation', () => {
     expect(() => deserializeBalanceAttestationV1(trailing)).toThrow(/trailing bytes/);
   });
 
+  it('rejects non-canonical Poseidon digest in asset_id / nav_ceiling', () => {
+    const bad = new Uint8Array(32).fill(0xff);
+    for (const field of ['assetId', 'navCeiling'] as const) {
+      const att = sampleAttestation();
+      if (field === 'assetId') att.assetId = bad;
+      if (field === 'navCeiling') att.navCeiling = bad;
+      expect(() => deserializeBalanceAttestationV1(serializeBalanceAttestationV1(att))).toThrow(
+        BalanceAttestationError,
+      );
+      expect(() => deserializeBalanceAttestationV1(serializeBalanceAttestationV1(att))).toThrow(
+        /non-canonical digest/,
+      );
+    }
+  });
+
+  it('rejects non-liftable x-only Pk_anchor / R_anchor', () => {
+    const zero = new Uint8Array(32);
+    for (const field of ['pkAnchor', 'rAnchor'] as const) {
+      const att = sampleAttestation();
+      if (field === 'pkAnchor') att.pkAnchor = zero;
+      if (field === 'rAnchor') att.rAnchor = zero;
+      expect(() => deserializeBalanceAttestationV1(serializeBalanceAttestationV1(att))).toThrow(
+        BalanceAttestationError,
+      );
+      expect(() => deserializeBalanceAttestationV1(serializeBalanceAttestationV1(att))).toThrow(
+        /invalid x-only/,
+      );
+    }
+  });
+
   it('fails asset_match on mismatch', () => {
     const att = sampleAttestation();
     const body = serializeBalanceAttestationV1(att);
@@ -183,8 +243,15 @@ describe('§5.7 balance attestation', () => {
     const frag = fragmentFor(att);
     const mismatch = verifyBalanceAttestationBytes(body, frag, { network: 'mainnet' });
     expect(mismatch.checks.find((c) => c.id === 'network_id')?.status).toBe('fail');
-    const openNet = verifyBalanceAttestationBytes(body, frag);
-    expect(openNet.checks.find((c) => c.id === 'network_id')?.status).toBe('open');
+    expect(mismatch.fatalError).toBeDefined();
+    expect(mismatch.fields).toBeUndefined();
+    // network is required; exercise the runtime missing path via cast.
+    const noNet = verifyBalanceAttestationBytes(body, frag, {
+      network: undefined as unknown as NetworkTag,
+    });
+    expect(noNet.checks.find((c) => c.id === 'network_id')?.status).toBe('fail');
+    expect(noNet.fatalError).toBeDefined();
+    expect(noNet.fields).toBeUndefined();
   });
 
   it('matches the testnet network id', () => {
@@ -228,9 +295,9 @@ describe('§5.7 balance attestation', () => {
       fetchNullifier: async () => ({
         present: true,
         position: 1n,
-        leaf: 'aa'.repeat(32),
-        audit_path: [],
-        tree_size: 1n,
+        leaf: encodeHexLower(att.rAnchor),
+        audit_path: ['aa'.repeat(32)],
+        tree_size: 2n,
         root: 'bb'.repeat(32),
         tip_block_hash: 'cc'.repeat(32),
         tip_height: 10n,
@@ -260,9 +327,9 @@ describe('§5.7 balance attestation', () => {
       fetchNullifier: async () => ({
         present: true,
         position: 1n,
-        leaf: 'aa'.repeat(32),
-        audit_path: [],
-        tree_size: 1n,
+        leaf: encodeHexLower(att.rAnchor),
+        audit_path: ['aa'.repeat(32)],
+        tree_size: 2n,
         root: 'bb'.repeat(32),
         tip_block_hash: 'cc'.repeat(32),
         tip_height: 10n,
@@ -279,9 +346,9 @@ describe('§5.7 balance attestation', () => {
       fetchNullifier: async () => ({
         present: true,
         position: 1n,
-        leaf: 'aa'.repeat(32),
-        audit_path: [],
-        tree_size: 1n,
+        leaf: encodeHexLower(att.rAnchor),
+        audit_path: ['aa'.repeat(32)],
+        tree_size: 2n,
         root: 'bb'.repeat(32),
         tip_block_hash: 'cc'.repeat(32),
         tip_height: 10n,
@@ -308,6 +375,90 @@ describe('§5.7 balance attestation', () => {
       }),
     });
     expect(absent.checks.find((c) => c.id === 'anchor_path_b')?.status).toBe('open');
+
+    const leafMismatch = await resolveBalanceAttestation(frag, {
+      network: 'regtest',
+      maxBlobBytes: 1_000_000,
+      fetchNullifier: async () => ({
+        present: true,
+        position: 1n,
+        leaf: 'aa'.repeat(32),
+        audit_path: ['00'.repeat(32)],
+        tree_size: 2n,
+        root: 'bb'.repeat(32),
+        tip_block_hash: 'cc'.repeat(32),
+        tip_height: 10n,
+      }),
+    });
+    const leafMismatchDetail = `Path-B leaf ${'aa'.repeat(32)} ≠ R_anchor ${encodeHexLower(att.rAnchor)}`;
+    expect(leafMismatch.checks.find((c) => c.id === 'anchor_path_b')?.status).toBe('fail');
+    expect(leafMismatch.checks.find((c) => c.id === 'anchor_path_b')?.detail).toBe(
+      leafMismatchDetail,
+    );
+    expect(leafMismatch.fatalError).toBe(leafMismatchDetail);
+    expect(leafMismatch.fields).toBeUndefined();
+
+    const noLeaf = await resolveBalanceAttestation(frag, {
+      network: 'regtest',
+      maxBlobBytes: 1_000_000,
+      fetchNullifier: async () => ({
+        present: true,
+        position: 1n,
+        audit_path: ['00'.repeat(32)],
+        tree_size: 2n,
+        root: 'bb'.repeat(32),
+        tip_block_hash: 'cc'.repeat(32),
+        tip_height: 10n,
+      }),
+    });
+    expect(noLeaf.checks.find((c) => c.id === 'anchor_path_b')?.status).toBe('fail');
+    expect(noLeaf.fatalError).toBeDefined();
+    expect(noLeaf.fields).toBeUndefined();
+
+    const matchLeafNoPosition = await resolveBalanceAttestation(frag, {
+      network: 'regtest',
+      maxBlobBytes: 1_000_000,
+      fetchNullifier: async () => ({
+        present: true,
+        leaf: encodeHexLower(att.rAnchor),
+        audit_path: ['00'.repeat(32)],
+        tree_size: 2n,
+        root: 'bb'.repeat(32),
+        tip_block_hash: 'cc'.repeat(32),
+        tip_height: 10n,
+      }),
+    });
+    expect(matchLeafNoPosition.checks.find((c) => c.id === 'anchor_path_b')?.status).toBe('fail');
+    expect(matchLeafNoPosition.fatalError).toBeDefined();
+    expect(matchLeafNoPosition.fields).toBeUndefined();
+
+    // Real fetch/parse path: present:true without position/leaf → NodeApiError malformed_response.
+    const malformedWire = await resolveBalanceAttestation(frag, {
+      network: 'regtest',
+      maxBlobBytes: 1_000_000,
+      fetchNullifier: (pk, opts) =>
+        fetchNullifier(pk, {
+          ...opts,
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                present: true,
+                audit_path: [],
+                tree_size: '1',
+                root: 'aa'.repeat(32),
+                tip_block_hash: 'bb'.repeat(32),
+                tip_height: '100',
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } },
+            ),
+        }),
+    });
+    expect(malformedWire.checks.find((c) => c.id === 'anchor_path_b')?.status).toBe('fail');
+    expect(malformedWire.checks.find((c) => c.id === 'anchor_path_b')?.detail).not.toMatch(
+      /lookup failed/,
+    );
+    expect(malformedWire.fatalError).toBeDefined();
+    expect(malformedWire.fields).toBeUndefined();
 
     const failed = await resolveBalanceAttestation(frag, {
       network: 'regtest',
@@ -440,6 +591,65 @@ describe('§5.7 balance attestation', () => {
       },
     );
     expect(ok.fields?.balance).toBe('9000');
+  });
+
+  it('handle form: invalid and non-http holderHint fail closed', async () => {
+    const att = sampleAttestation();
+    const body = serializeBalanceAttestationV1(att);
+    const handle = sha256(body);
+
+    let fetchCalled = false;
+    const mixed = await resolveBalanceAttestation(
+      {
+        status: 'ok',
+        kind: 'balance',
+        address: att.subject.slice(),
+        assetIdHex: encodeHexLower(att.assetId),
+        attestationForm: 'handle',
+        attestationHandle: handle,
+        holderHint: 'https://a.example,ftp://x',
+      },
+      {
+        network: 'regtest',
+        maxBlobBytes: 1_000_000,
+        fetchFromHolders: async () => {
+          fetchCalled = true;
+          return { body, holder: 'https://a.example' };
+        },
+      },
+    );
+    expect(mixed.fatalError).toBe('holder hint contains an invalid locator at index 1');
+    expect(mixed.fatalError).not.toMatch(/BlobLocatorSet/);
+    expect(fetchCalled).toBe(false);
+
+    const garbage = await resolveBalanceAttestation(
+      {
+        status: 'ok',
+        kind: 'balance',
+        address: att.subject.slice(),
+        assetIdHex: encodeHexLower(att.assetId),
+        attestationForm: 'handle',
+        attestationHandle: handle,
+        holderHint: 'garbage',
+      },
+      { network: 'regtest', maxBlobBytes: 1_000_000 },
+    );
+    expect(garbage.fatalError).toBe('holder hint is not a valid BlobLocatorSet');
+    expect(garbage.fatalError).not.toBe('BlobLocatorSet required for h: attestation form');
+
+    const bareHttps = await resolveBalanceAttestation(
+      {
+        status: 'ok',
+        kind: 'balance',
+        address: att.subject.slice(),
+        assetIdHex: encodeHexLower(att.assetId),
+        attestationForm: 'handle',
+        attestationHandle: handle,
+        holderHint: '@https://',
+      },
+      { network: 'regtest', maxBlobBytes: 1_000_000 },
+    );
+    expect(bareHttps.fatalError).toBe('holder hint contains an invalid locator');
   });
 
   it('inline empty body and decode error on resolve', async () => {

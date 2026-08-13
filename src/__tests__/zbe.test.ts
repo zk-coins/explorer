@@ -130,11 +130,14 @@ describe('ZBE §4.2.1', () => {
 
   it('rejects swapped chunk order (AAD binds index)', () => {
     const k = testKtx();
-    const p = new Uint8Array(ZBE_CHUNK + 1);
+    // Two full chunks so a swap stays framing-canonical; failure is AAD index auth.
+    const p = new Uint8Array(ZBE_CHUNK * 2);
     p.fill(0x55);
     const { ciphertext } = zbeSeal(k, p);
     const { n, chunks } = parseChunks(ciphertext);
     expect(n).toBe(2);
+    expect(chunks[0]!.length).toBe(ZBE_CHUNK + ZBE_TAG_LEN);
+    expect(chunks[1]!.length).toBe(ZBE_CHUNK + ZBE_TAG_LEN);
     const swapped = frame(n, [chunks[1]!, chunks[0]!]);
     try {
       zbeOpen(k, swapped);
@@ -288,6 +291,58 @@ describe('ZBE §4.2.1', () => {
       expect.fail('expected chunk_too_short');
     } catch (err) {
       expect((err as ZbeError).code).toBe('chunk_too_short');
+    }
+  });
+
+  it('rejects non-canonical non-last chunk length (chunk_noncanonical)', () => {
+    const k = testKtx();
+    // N=2, first chunk len = ZBE_TAG_LEN + 1 (not ZBE_CHUNK + ZBE_TAG_LEN).
+    const badLen = ZBE_TAG_LEN + 1;
+    const payload = new Uint8Array(badLen);
+    payload.fill(0xab);
+    const ct = frame(2, [payload]);
+    try {
+      zbeOpen(k, ct);
+      expect.fail('expected chunk_noncanonical');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ZbeError);
+      expect((err as ZbeError).code).toBe('chunk_noncanonical');
+      expect((err as ZbeError).chunkIndex).toBe(0);
+    }
+  });
+
+  it('rejects last chunk longer than CHUNK+TAG (chunk_noncanonical)', () => {
+    const k = testKtx();
+    // N=1, sole chunk len = ZBE_CHUNK + ZBE_TAG_LEN + 1.
+    const badLen = ZBE_CHUNK + ZBE_TAG_LEN + 1;
+    const payload = new Uint8Array(badLen);
+    payload.fill(0xab);
+    const ct = frame(1, [payload]);
+    try {
+      zbeOpen(k, ct);
+      expect.fail('expected chunk_noncanonical');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ZbeError);
+      expect((err as ZbeError).code).toBe('chunk_noncanonical');
+      expect((err as ZbeError).message).toMatch(/exceeds max/);
+    }
+  });
+
+  it('rejects empty last chunk when N>1 (chunk_noncanonical)', () => {
+    const k = testKtx();
+    // N=2: full first chunk, empty last (len === ZBE_TAG_LEN only).
+    const first = new Uint8Array(ZBE_CHUNK + ZBE_TAG_LEN);
+    first.fill(0xab);
+    const second = new Uint8Array(ZBE_TAG_LEN);
+    second.fill(0xcd);
+    const ct = frame(2, [first, second]);
+    try {
+      zbeOpen(k, ct);
+      expect.fail('expected chunk_noncanonical');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ZbeError);
+      expect((err as ZbeError).code).toBe('chunk_noncanonical');
+      expect((err as ZbeError).message).toMatch(/empty|N=2/);
     }
   });
 

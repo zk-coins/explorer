@@ -35,7 +35,8 @@ export type ZbeErrorCode =
   | 'trailing_bytes'
   | 'auth_failed'
   | 'too_many_chunks'
-  | 'bad_key_length';
+  | 'bad_key_length'
+  | 'chunk_noncanonical';
 
 export class ZbeError extends Error {
   readonly code: ZbeErrorCode;
@@ -198,6 +199,31 @@ export function zbeOpen(kTx: Uint8Array, ciphertext: Uint8Array): Uint8Array {
         `ZBE chunk ${i} length ${len} is shorter than Poly1305 tag (16)`,
         i,
       );
+    }
+    const maxCanonical = ZBE_CHUNK + ZBE_TAG_LEN;
+    if (i < n - 1) {
+      if (len !== maxCanonical) {
+        throw new ZbeError(
+          'chunk_noncanonical',
+          `ZBE non-last chunk ${i} length ${len} must be exactly ${maxCanonical}`,
+          i,
+        );
+      }
+    } else {
+      if (len > maxCanonical) {
+        throw new ZbeError(
+          'chunk_noncanonical',
+          `ZBE last chunk ${i} length ${len} exceeds max ${maxCanonical}`,
+          i,
+        );
+      }
+      if (n > 1 && len === ZBE_TAG_LEN) {
+        throw new ZbeError(
+          'chunk_noncanonical',
+          `ZBE last chunk ${i} is empty (len=${len}) with N=${n} > 1`,
+          i,
+        );
+      }
     }
     sealedChunks.push(ciphertext.subarray(offset, offset + len));
     offset += len;

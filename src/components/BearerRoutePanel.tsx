@@ -82,7 +82,7 @@ function TxBody({ result }: { result: TxFragmentResult | null }) {
     }
     let cancelled = false;
     setLoading(true);
-    resolveConfirmationLink(result)
+    resolveConfirmationLink(result, { maxInscriptionPages: 50 })
       .then((v) => {
         if (!cancelled) {
           setView(v);
@@ -126,13 +126,13 @@ function TxBody({ result }: { result: TxFragmentResult | null }) {
       {view.fatalError !== undefined && (
         <ErrorState title="Confirmation failed" message={view.fatalError} />
       )}
-      {view.state !== undefined && (
+      {view.state !== undefined && view.fatalError === undefined && (
         <div className="flex items-center gap-2">
           <span className="text-sm text-ink2">§3.10 state</span>
           <StateBadge state={view.state} />
         </div>
       )}
-      {view.coin !== undefined && (
+      {view.coin !== undefined && view.fatalError === undefined && (
         <section
           data-testid="coin-fields"
           className="space-y-1 rounded border border-line bg-surface p-4 text-sm"
@@ -147,7 +147,7 @@ function TxBody({ result }: { result: TxFragmentResult | null }) {
           )}
         </section>
       )}
-      {view.creatingNullifier !== undefined && (
+      {view.creatingNullifier !== undefined && view.fatalError === undefined && (
         <section
           data-testid="anchoring-trail"
           className="space-y-1 rounded border border-line bg-surface p-4 text-sm"
@@ -236,7 +236,7 @@ function BalanceBody({ result }: { result: BalanceFragmentResult | null }) {
       {view.fatalError !== undefined && (
         <ErrorState title="Attestation failed" message={view.fatalError} />
       )}
-      {view.fields !== undefined && (
+      {view.fields !== undefined && view.fatalError === undefined && (
         <section
           data-testid="attestation-fields"
           className="space-y-1 rounded border border-line bg-surface p-4 text-sm"
@@ -344,8 +344,12 @@ function AddrBody({ result }: { result: AddrFragmentResult | null }) {
               history · not yet resolvable in this build
             </p>
             <p className="mt-1 text-ink2">
-              Nostr mesh discovery did not yield resolvable history for this link (no holder/relay
-              scan result). An empty list below is not a verified &quot;no payments&quot; result.
+              {view.historyGap === 'empty_unverified'
+                ? 'An empty list below is not a verified "no payments" result.'
+                : view.historyGap === 'partial_unresolved' ||
+                    view.historyGap === 'rejected_candidate'
+                  ? 'History is incomplete; unresolved or rejected candidates remain.'
+                  : 'Nostr mesh discovery did not yield resolvable history for this link (no holder/relay scan result). An empty list below is not a verified "no payments" result.'}
             </p>
           </div>
         )}

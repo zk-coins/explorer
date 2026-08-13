@@ -35,6 +35,7 @@ const INSCRIPTION_FORMATS = new Set([0, 1]);
 const NETWORKS = new Set(['mainnet', 'testnet', 'regtest']);
 const NULLIFIER_STATES = new Set(['pending', 'completed', 'failed']);
 const CONFIRMATION_STATES = new Set(['pending', 'completed']);
+const RESERVED_ERROR_CODES = new Set(['malformed_response', 'network_error']);
 
 /** Lowercase hex of exactly `byteLen` bytes (2*byteLen chars). */
 const HEX32_RE = /^[0-9a-f]{64}$/;
@@ -73,7 +74,11 @@ async function getJson<T>(
     let message = `HTTP ${res.status}`;
     try {
       const body = (await res.json()) as ApiErrorBody;
-      if (typeof body.error === 'string' && body.error.length > 0) {
+      if (
+        typeof body.error === 'string' &&
+        body.error.length > 0 &&
+        !RESERVED_ERROR_CODES.has(body.error)
+      ) {
         code = body.error;
       }
       if (typeof body.message === 'string' && body.message.length > 0) {
@@ -402,6 +407,30 @@ export function parseNullifierLookupResponse(raw: unknown): NullifierLookupRespo
   if (o.present) {
     base.position = requireU64(o, 'position', 'nullifier (present)');
     base.leaf = requireHex32(o, 'leaf', 'nullifier (present)');
+    // Membership claim requires a non-empty tree and an in-range position.
+    if (base.tree_size === 0n || base.position! >= base.tree_size) {
+      throw new NodeApiError(
+        200,
+        'malformed_response',
+        `nullifier: present membership requires tree_size > 0 and position < tree_size (got position=${base.position!.toString(10)}, tree_size=${base.tree_size.toString(10)})`,
+      );
+    }
+    // Structural path length only — no root reconstruction / sibling semantics.
+    if (base.tree_size === 1n) {
+      if (audit_path.length !== 0) {
+        throw new NodeApiError(
+          200,
+          'malformed_response',
+          `nullifier: present with tree_size=1 requires empty audit_path (got length ${audit_path.length})`,
+        );
+      }
+    } else if (base.tree_size > 1n && audit_path.length === 0) {
+      throw new NodeApiError(
+        200,
+        'malformed_response',
+        `nullifier: present with tree_size>1 requires non-empty audit_path (got tree_size=${base.tree_size.toString(10)}, audit_path length 0)`,
+      );
+    }
   }
   return base;
 }

@@ -269,6 +269,67 @@ describe('BearerRoutePanel', () => {
     });
   });
 
+  it('balance: fatalError hides attestation-fields', async () => {
+    const address = encodeBech32m(EXPLORER_HRPS.zk, p(32, 5));
+    const assetId = 'ab'.repeat(32);
+    const inline = base64UrlEncodeNoPad(fill(32, 9));
+    await setHash(`#${address}/${assetId}/i:${inline}`);
+    resolveBalanceAttestation.mockResolvedValue({
+      checks: [{ id: 'decode', label: 'd', status: 'pass', detail: 'ok' }],
+      fields: {
+        subjectHex: '11'.repeat(32),
+        assetIdHex: assetId,
+        balance: '9000',
+        navCeilingHex: '22'.repeat(32),
+        sizeCeiling: '1',
+        txidHex: '33'.repeat(32),
+        blockHashHex: '44'.repeat(32),
+        height: '1',
+        pkAnchorHex: '55'.repeat(32),
+        rAnchorHex: '66'.repeat(32),
+        networkIdHex: '77'.repeat(32),
+        proofLen: 10,
+      },
+      fatalError: 'Path-B leaf …',
+    });
+    render(<BearerRoutePanel kind="balance" />);
+    await waitFor(() => {
+      expect(screen.getByTestId('error-state').textContent).toMatch(/Path-B leaf/);
+    });
+    expect(screen.queryByTestId('attestation-fields')).toBeNull();
+  });
+
+  it('tx: fatalError hides coin-fields', async () => {
+    const bundle = encodeBech32m(EXPLORER_HRPS.zkbid, p(32, 1));
+    const viewKey = encodeBech32m(EXPLORER_HRPS.zkview, p(32, 2));
+    await setHash(`#${bundle}/${viewKey}`);
+    resolveConfirmationLink.mockResolvedValue({
+      checks: [{ id: 'nullifier_r_match', label: 'r', status: 'fail', detail: 'mismatch' }],
+      fatalError: 'Path-B leaf …',
+      // Fields present in the mock — UI must still gate them on fatalError.
+      coin: {
+        amount: '100',
+        assetIdHex: 'aa'.repeat(32),
+        recipientHex: 'bb'.repeat(32),
+        identifierHex: 'cc'.repeat(32),
+      },
+      creatingNullifier: {
+        pkCreateHex: '11'.repeat(32),
+        rCreateHex: '22'.repeat(32),
+        rPrimeCreateHex: '33'.repeat(32),
+      },
+      navOpening: { size: '3', mthHex: 'ee'.repeat(32) },
+      state: 'completed',
+    });
+    render(<BearerRoutePanel kind="tx" />);
+    await waitFor(() => {
+      expect(screen.getByTestId('error-state').textContent).toMatch(/Path-B leaf/);
+    });
+    expect(screen.queryByTestId('coin-fields')).toBeNull();
+    expect(screen.queryByTestId('anchoring-trail')).toBeNull();
+    expect(screen.queryByText(/§3\.10 state/)).toBeNull();
+  });
+
   it('balance: non-Error rejection is rendered', async () => {
     const address = encodeBech32m(EXPLORER_HRPS.zk, p(32, 5));
     const assetId = 'ab'.repeat(32);
@@ -394,10 +455,73 @@ describe('BearerRoutePanel', () => {
     });
     expect(screen.getByTestId('avk-mode').textContent).toMatch(/full/);
     expect(screen.getByTestId('history-not-resolvable')).toBeTruthy();
+    // historyGap unset → no_scan banner text (legacy default)
+    expect(screen.getByTestId('history-not-resolvable').textContent).toMatch(/no holder\/relay/);
+    expect(screen.getByTestId('history-not-resolvable').textContent).toMatch(/scan result/);
     expect(screen.getByTestId('history-incoming')).toBeTruthy();
     expect(screen.getByTestId('history-outgoing-not-derivable')).toBeTruthy();
     expect(screen.getByTestId('history-outgoing-unresolved')).toBeTruthy();
     expect(screen.getByTestId('history-outgoing')).toBeTruthy();
+
+    cleanup();
+    // empty_unverified banner copy
+    await setHash(`#${address}/${avk}`);
+    resolveAddressView.mockResolvedValue({
+      mode: 'full',
+      addressHex: 'aa'.repeat(32),
+      checks: [],
+      history: [],
+      historyNotResolvable: true,
+      historyGap: 'empty_unverified',
+    });
+    render(<BearerRoutePanel kind="addr" />);
+    await waitFor(() => {
+      expect(screen.getByTestId('history-not-resolvable')).toBeTruthy();
+    });
+    expect(screen.getByTestId('history-not-resolvable').textContent).toMatch(
+      /not a verified "no payments"/,
+    );
+    expect(screen.getByTestId('history-not-resolvable').textContent).not.toMatch(
+      /no holder\/relay/,
+    );
+
+    cleanup();
+    // partial_unresolved banner copy
+    await setHash(`#${address}/${avk}`);
+    resolveAddressView.mockResolvedValue({
+      mode: 'full',
+      addressHex: 'aa'.repeat(32),
+      checks: [],
+      history: [],
+      historyNotResolvable: true,
+      historyGap: 'partial_unresolved',
+    });
+    render(<BearerRoutePanel kind="addr" />);
+    await waitFor(() => {
+      expect(screen.getByTestId('history-not-resolvable')).toBeTruthy();
+    });
+    expect(screen.getByTestId('history-not-resolvable').textContent).toMatch(
+      /History is incomplete; unresolved or rejected candidates remain\./,
+    );
+
+    cleanup();
+    // rejected_candidate shares the partial/unresolved banner copy
+    await setHash(`#${address}/${avk}`);
+    resolveAddressView.mockResolvedValue({
+      mode: 'full',
+      addressHex: 'aa'.repeat(32),
+      checks: [],
+      history: [],
+      historyNotResolvable: true,
+      historyGap: 'rejected_candidate',
+    });
+    render(<BearerRoutePanel kind="addr" />);
+    await waitFor(() => {
+      expect(screen.getByTestId('history-not-resolvable')).toBeTruthy();
+    });
+    expect(screen.getByTestId('history-not-resolvable').textContent).toMatch(
+      /History is incomplete; unresolved or rejected candidates remain\./,
+    );
 
     cleanup();
     // incoming-only mode empty history without historyNotResolvable.

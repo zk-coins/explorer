@@ -13,13 +13,17 @@
 
 import { fetchBlossomBlob, fetchBlossomBlobFromHolders } from '@/lib/api/blossom';
 import { fetchInfo, fetchInscriptions, fetchNullifier } from '@/lib/api/client';
-import type { NullifierState } from '@/lib/api/types';
+import { NodeApiError, type NullifierState } from '@/lib/api/types';
 import { coinToView, deserializeCoinProof, type CoinProof } from '@/lib/bundle/coinProof';
 import { encodeHexLower } from '@/lib/crypto/bytes';
 import { verifyBlobId, ZbeError, zbeOpen } from '@/lib/crypto/zbe';
 import { fail, open, pass, type CheckItem } from '@/lib/bearer/checks';
+import { parseHolderLocators } from '@/lib/bearer/httpLocator';
 import { stateFromInscriptions } from '@/lib/bearer/stateFromNode';
 import type { TxFragmentOk } from '@/lib/fragments';
+
+const INSCRIPTION_PAGE_LIMIT = 200;
+const INSCRIPTION_MAX_PAGES = 50;
 
 export interface ConfirmationView {
   checks: CheckItem[];
@@ -59,32 +63,6 @@ export interface ConfirmationDeps {
   signal?: AbortSignal;
   /** Max inscription pages to scan for creating Pk (default 50). */
   maxInscriptionPages?: number;
-}
-
-function parseHolderHint(hint: string | undefined): string[] {
-  if (hint === undefined || hint.length === 0) {
-    return [];
-  }
-  // §5.6 holder hint: `op:<pk>` or `@<relay-url>` — only `@http(s)://…` is a
-  // Blossom base we can GET. Comma-separated bases (as in §5.7 BlobLocatorSet)
-  // are also accepted when a producer re-uses the same suffix form.
-  if (hint.startsWith('@')) {
-    const url = hint.slice(1);
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      return [url];
-    }
-    return [];
-  }
-  if (hint.includes(',')) {
-    return hint
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.startsWith('http://') || s.startsWith('https://'));
-  }
-  if (hint.startsWith('http://') || hint.startsWith('https://')) {
-    return [hint];
-  }
-  return [];
 }
 
 /**
@@ -139,7 +117,12 @@ export function openConfirmationBlob(
     );
     return { checks, coinProof };
   } catch (err) {
-    const detail = err instanceof Error ? err.message : /* v8 ignore next -- deserializeCoinProof reports every malformed proof with CoinProofError */ String(err);
+    const detail =
+      err instanceof Error
+        ? err.message
+        : /* v8 ignore next -- deserializeCoinProof reports every malformed proof with CoinProofError */ String(
+            err,
+          );
     checks.push(
       fail('coinproof_decode', 'CoinProof decode (width + digests/points/asset_id)', detail),
     );
@@ -158,20 +141,18 @@ export async function findCreatingPkInInscriptions(
   opts: {
     baseUrl?: string;
     signal?: AbortSignal;
-    pageLimit?: number;
-    maxPages?: number;
-  } = {},
+    pageLimit: number;
+    maxPages: number;
+  },
 ): Promise<{ hit?: ReturnType<typeof stateFromInscriptions>; pagesScanned: number }> {
-  const pageLimit = opts.pageLimit ?? 200;
-  const maxPages = opts.maxPages ?? 50;
   let from_height: bigint | undefined;
   let from_tx_index: number | undefined;
   let from_vin_index: number | undefined;
   let pagesScanned = 0;
 
-  for (let page = 0; page < maxPages; page++) {
+  for (let page = 0; page < opts.maxPages; page++) {
     const insc = await fetchInsc({
-      limit: pageLimit,
+      limit: opts.pageLimit,
       ...(from_height !== undefined ? { from_height } : {}),
       ...(from_tx_index !== undefined ? { from_tx_index } : {}),
       ...(from_vin_index !== undefined ? { from_vin_index } : {}),
@@ -209,10 +190,18 @@ export async function resolveConfirmationLink(
   const fetchInf = deps.fetchInfo ?? fetchInfo;
   const signal = deps.signal;
   const baseUrl = deps.baseUrl;
-  const maxInscriptionPages = deps.maxInscriptionPages ?? 50;
+  const maxInscriptionPages =
+    deps.maxInscriptionPages !== undefined ? deps.maxInscriptionPages : INSCRIPTION_MAX_PAGES;
 
   const checks: CheckItem[] = [];
-  const holders = parseHolderHint(fragment.holderHint);
+  const parsedHolders = parseHolderLocators(fragment.holderHint);
+  if (parsedHolders.status === 'invalid') {
+    return {
+      checks: [fail('fetch_blob', 'Fetch ZBE blob (Blossom)', parsedHolders.detail)],
+      fatalError: parsedHolders.detail,
+    };
+  }
+  const holders = parsedHolders.status === 'ok' ? parsedHolders.locators : [];
 
   // max_blob_bytes is required before any untrusted body load.
   let maxBlobBytes: number | bigint;
@@ -272,11 +261,7 @@ export async function resolveConfirmationLink(
   };
 
   checks.push(
-    pass(
-      'coin_fields',
-      'Coin fields present',
-      `amount=${coin.amount} asset_id=${coin.assetIdHex.slice(0, 16)}…`,
-    ),
+    pass('coin_fields', 'Coin fields present', `asset_id=${coin.assetIdHex.slice(0, 16)}…`),
   );
 
   // Open steps the explorer cannot run in-browser:
@@ -311,34 +296,92 @@ export async function resolveConfirmationLink(
 
   const anchoring: ConfirmationView['anchoring'] = {};
   let state: NullifierState | undefined;
+  let fatalError: string | undefined;
+  // Path-B inconsistency makes chain state unusable — never set state/confirmations from inscriptions.
+  let pathBRMismatch = false;
+  let pathBFailureReason = '';
   try {
     const nf = await fetchNf(creatingNullifier.pkCreateHex, { baseUrl, signal });
     anchoring.tipHeight = nf.tip_height;
     anchoring.tipBlockHash = nf.tip_block_hash;
     anchoring.nullifierPresent = nf.present;
-    if (nf.present && nf.position !== undefined) {
-      anchoring.position = nf.position;
-      checks.push(
-        pass(
-          'nullifier_path_b',
-          'Path-B nullifier lookup (creating Pk)',
-          `present at position ${nf.position}; tip_height=${nf.tip_height}`,
-        ),
-      );
-      if (nf.leaf !== undefined && nf.leaf === creatingNullifier.rCreateHex) {
+    if (nf.present === true) {
+      // PASS only when position and leaf are set and leaf binds to R_create.
+      if (
+        nf.position === undefined ||
+        nf.leaf === undefined ||
+        nf.leaf !== creatingNullifier.rCreateHex
+      ) {
+        pathBRMismatch = true;
+        if (nf.position !== undefined) {
+          anchoring.position = nf.position;
+        }
+        if (nf.position === undefined) {
+          pathBFailureReason = 'Path-B present without position — cannot bind to R_create';
+          fatalError = pathBFailureReason;
+          checks.push(
+            fail(
+              'nullifier_path_b',
+              'Path-B nullifier lookup (creating Pk)',
+              'present without position — cannot bind to R_create',
+            ),
+          );
+          checks.push(
+            fail(
+              'nullifier_r_match',
+              'Path-B leaf R equals R_create',
+              'present without position — cannot bind to R_create',
+            ),
+          );
+        } else if (nf.leaf === undefined) {
+          pathBFailureReason = 'Path-B present without leaf — cannot bind to R_create';
+          fatalError = pathBFailureReason;
+          checks.push(
+            fail(
+              'nullifier_path_b',
+              'Path-B nullifier lookup (creating Pk)',
+              'present without leaf — cannot bind to R_create',
+            ),
+          );
+          checks.push(
+            fail(
+              'nullifier_r_match',
+              'Path-B leaf R equals R_create',
+              'present without leaf — cannot bind to R_create',
+            ),
+          );
+        } else {
+          pathBFailureReason = `Path-B leaf ${nf.leaf} ≠ R_create ${creatingNullifier.rCreateHex}`;
+          fatalError = pathBFailureReason;
+          checks.push(
+            fail(
+              'nullifier_path_b',
+              'Path-B nullifier lookup (creating Pk)',
+              `present at position ${nf.position} but leaf does not bind to R_create`,
+            ),
+          );
+          checks.push(
+            fail(
+              'nullifier_r_match',
+              'Path-B leaf R equals R_create',
+              `Node leaf ${nf.leaf} ≠ R_create ${creatingNullifier.rCreateHex}`,
+            ),
+          );
+        }
+      } else {
+        anchoring.position = nf.position;
+        checks.push(
+          pass(
+            'nullifier_path_b',
+            'Path-B nullifier lookup (creating Pk)',
+            `present at position ${nf.position}; tip_height=${nf.tip_height}`,
+          ),
+        );
         checks.push(
           pass(
             'nullifier_r_match',
             'Path-B leaf R equals R_create',
             'Node leaf matches creating_nullifier.R_create',
-          ),
-        );
-      } else if (nf.leaf !== undefined) {
-        checks.push(
-          fail(
-            'nullifier_r_match',
-            'Path-B leaf R equals R_create',
-            `Node leaf ${nf.leaf} ≠ R_create ${creatingNullifier.rCreateHex}`,
           ),
         );
       }
@@ -355,47 +398,79 @@ export async function resolveConfirmationLink(
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     checks.push(fail('nullifier_path_b', 'Path-B nullifier lookup (creating Pk)', detail));
+    // Malformed wire (present:true without position/leaf) is fail-closed: do not set state from inscriptions.
+    if (err instanceof NodeApiError && err.code === 'malformed_response') {
+      pathBFailureReason = detail;
+      fatalError = detail;
+      pathBRMismatch = true;
+    }
   }
 
-  try {
-    const { hit, pagesScanned } = await findCreatingPkInInscriptions(
-      creatingNullifier.pkCreateHex,
-      creatingNullifier.rCreateHex,
-      fetchInsc,
-      { baseUrl, signal, maxPages: maxInscriptionPages },
-    );
-    if (hit !== undefined) {
-      state = hit.state;
-      anchoring.revealTxid = hit.txid;
-      anchoring.height = hit.height;
-      if (anchoring.tipHeight !== undefined) {
-        anchoring.confirmations = anchoring.tipHeight - hit.height + 1n;
-      }
-      checks.push(
-        pass(
-          'state_310',
-          '§3.10 state (from node inscription data)',
-          `state=${hit.state} reveal_txid=${hit.txid} height=${hit.height.toString(10)} (pages=${pagesScanned})`,
-        ),
-      );
-    } else {
-      checks.push(
-        open(
-          'state_310',
-          '§3.10 state (from node inscription data)',
-          `Creating (Pk, R) pair not found after scanning ${pagesScanned} inscription page(s) — state not asserted`,
-        ),
-      );
-    }
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+  if (pathBRMismatch) {
     checks.push(
-      open(
+      fail(
         'state_310',
         '§3.10 state (from node inscription data)',
-        `Could not load inscriptions: ${detail}`,
+        `Skipped: ${pathBFailureReason} — state not asserted from inscriptions under inconsistent chain data`,
       ),
     );
+  } else {
+    try {
+      const { hit, pagesScanned } = await findCreatingPkInInscriptions(
+        creatingNullifier.pkCreateHex,
+        creatingNullifier.rCreateHex,
+        fetchInsc,
+        { baseUrl, signal, pageLimit: INSCRIPTION_PAGE_LIMIT, maxPages: maxInscriptionPages },
+      );
+      if (hit !== undefined) {
+        if (anchoring.tipHeight !== undefined && hit.height > anchoring.tipHeight) {
+          fatalError = `reveal height ${hit.height.toString(10)} > tip_height ${anchoring.tipHeight.toString(10)}`;
+          checks.push(
+            fail(
+              'state_310',
+              '§3.10 state (from node inscription data)',
+              `reveal height ${hit.height.toString(10)} > tip_height ${anchoring.tipHeight.toString(10)} — inconsistent chain tip`,
+            ),
+          );
+        } else {
+          state = hit.state;
+          anchoring.revealTxid = hit.txid;
+          anchoring.height = hit.height;
+          if (anchoring.tipHeight !== undefined) {
+            anchoring.confirmations = anchoring.tipHeight - hit.height + 1n;
+          }
+          checks.push(
+            pass(
+              'state_310',
+              '§3.10 state (from node inscription data)',
+              `state=${hit.state} reveal_txid=${hit.txid} height=${hit.height.toString(10)} (pages=${pagesScanned})`,
+            ),
+          );
+        }
+      } else {
+        checks.push(
+          open(
+            'state_310',
+            '§3.10 state (from node inscription data)',
+            `Creating (Pk, R) pair not found after scanning ${pagesScanned} inscription page(s) — state not asserted`,
+          ),
+        );
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      if (err instanceof NodeApiError && err.code === 'malformed_response') {
+        fatalError = detail;
+        checks.push(fail('state_310', '§3.10 state (from node inscription data)', detail));
+      } else {
+        checks.push(
+          open(
+            'state_310',
+            '§3.10 state (from node inscription data)',
+            `Could not load inscriptions: ${detail}`,
+          ),
+        );
+      }
+    }
   }
 
   // Asset name only after semantic decode (asset_id recompute already ran when terms present).
@@ -409,15 +484,21 @@ export async function resolveConfirmationLink(
     }
   }
 
+  // On fatalError omit coin / creatingNullifier / navOpening / state (Path-B
+  // failures must not surface coin fields). anchoring and assetTermsName may remain.
   const view: ConfirmationView = {
     checks,
-    coin,
-    creatingNullifier,
-    navOpening,
     anchoring,
   };
-  if (state !== undefined) {
-    view.state = state;
+  if (fatalError === undefined) {
+    view.coin = coin;
+    view.creatingNullifier = creatingNullifier;
+    view.navOpening = navOpening;
+    if (state !== undefined) {
+      view.state = state;
+    }
+  } else {
+    view.fatalError = fatalError;
   }
   if (assetTermsName !== undefined) {
     view.assetTermsName = assetTermsName;

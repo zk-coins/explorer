@@ -72,7 +72,6 @@ function buildTxCore(): {
   const plain = serializeCoinProof(cp);
   const { ciphertext, blobId } = zbeSeal(K_TX, plain);
   requireLen(blobId, 32, 'blobId');
-  requireLen(ciphertext, ciphertext.length, 'ciphertext');
 
   const blobIdHex = encodeHexLower(blobId);
   const zkbid = encodeBech32m(EXPLORER_HRPS.zkbid, blobId);

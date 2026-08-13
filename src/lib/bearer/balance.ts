@@ -21,7 +21,7 @@ import { digestToBytes, networkIdMainnet, networkIdRegtest, networkIdTestnet } f
 import { fetchBlossomBlobFromHolders } from '@/lib/api/blossom';
 import { assertDecodedSize } from '@/lib/api/bodyLimit';
 import { fetchInfo, fetchNullifier } from '@/lib/api/client';
-import type { NetworkTag } from '@/lib/api/types';
+import { NodeApiError, type NetworkTag } from '@/lib/api/types';
 import {
   attestationToView,
   deserializeBalanceAttestationV1,
@@ -35,6 +35,7 @@ import {
 } from '@/lib/crypto/bytes';
 import { sha256 } from '@/lib/crypto/sha256';
 import { fail, open, pass, type CheckItem } from '@/lib/bearer/checks';
+import { parseHolderLocators } from '@/lib/bearer/httpLocator';
 import type { BalanceFragmentOk } from '@/lib/fragments';
 
 export interface BalanceAttestationView {
@@ -58,17 +59,6 @@ export interface BalanceDeps {
   maxBlobBytes?: number | bigint;
 }
 
-function parseBlobLocatorSet(hint: string | undefined): string[] {
-  if (hint === undefined || hint.length === 0) {
-    return [];
-  }
-  // §5.7: percent-decoded holder-hint is comma-joined Blossom bases.
-  return hint
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
-
 function networkIdBytes(network: NetworkTag): Uint8Array {
   const digest =
     network === 'mainnet'
@@ -81,14 +71,15 @@ function networkIdBytes(network: NetworkTag): Uint8Array {
 
 /**
  * Pure verification of already-obtained attestation bytes against the fragment.
+ * Callers must supply `network`; missing/undefined fails closed (no fields).
  */
 export function verifyBalanceAttestationBytes(
   body: Uint8Array,
   fragment: BalanceFragmentOk,
   opts: {
-    network?: NetworkTag;
+    network: NetworkTag;
     expectedHandle?: Uint8Array;
-  } = {},
+  },
 ): BalanceAttestationView {
   const checks: CheckItem[] = [];
 
@@ -117,7 +108,12 @@ export function verifyBalanceAttestationBytes(
   try {
     att = deserializeBalanceAttestationV1(body);
   } catch (err) {
-    const detail = err instanceof Error ? err.message : /* v8 ignore next -- deserializeBalanceAttestationV1 reports every malformed wire body with BalanceAttestationError */ String(err);
+    const detail =
+      err instanceof Error
+        ? err.message
+        : /* v8 ignore next -- deserializeBalanceAttestationV1 reports every malformed wire body with BalanceAttestationError */ String(
+            err,
+          );
     checks.push(fail('decode', 'BalanceAttestationV1 decode', detail));
     return { checks, fatalError: detail };
   }
@@ -127,16 +123,20 @@ export function verifyBalanceAttestationBytes(
   const subjectMismatch = subjectHex !== fragSubjectHex;
   const assetHex = encodeHexLower(att.assetId);
   const assetMismatch = assetHex !== fragment.assetIdHex;
+  // Required by type; still fail-closed if undefined after cast (no silent open).
+  const suppliedNetwork: NetworkTag | undefined = opts.network;
+  const networkMissing = suppliedNetwork === undefined;
+  let networkMismatch = false;
 
-  checks.push(
-    pass(
-      'decode',
-      'BalanceAttestationV1 decode',
-      subjectMismatch || assetMismatch
-        ? `proof_len=${att.proof.length}`
-        : `balance=${att.balance.toString(10)} proof_len=${att.proof.length}`,
-    ),
-  );
+  if (suppliedNetwork !== undefined) {
+    const expectedNid = networkIdBytes(suppliedNetwork);
+    if (!bytesEqual(att.networkId, expectedNid)) {
+      networkMismatch = true;
+    }
+  }
+
+  // Balance belongs only in view.fields (hidden on fatal); never in check detail.
+  checks.push(pass('decode', 'BalanceAttestationV1 decode', `proof_len=${att.proof.length}`));
 
   if (subjectHex !== fragSubjectHex) {
     checks.push(
@@ -162,29 +162,25 @@ export function verifyBalanceAttestationBytes(
     checks.push(pass('asset_match', 'asset_id equals fragment asset_id', assetHex));
   }
 
-  if (opts.network !== undefined) {
-    const expectedNid = networkIdBytes(opts.network);
-    if (!bytesEqual(att.networkId, expectedNid)) {
-      checks.push(
-        fail(
-          'network_id',
-          'network_id equals verifier network',
-          `attestation network_id ${encodeHexLower(att.networkId)} ≠ ${opts.network}`,
-        ),
-      );
-    } else {
-      checks.push(
-        pass('network_id', 'network_id equals verifier network', `matches ${opts.network}`),
-      );
-    }
-  } else {
-    // Pure helper without network: leave open. Live resolve always supplies network.
+  if (networkMissing) {
     checks.push(
-      open(
+      fail(
         'network_id',
         'network_id equals verifier network',
-        'Network not supplied to pure helper; live resolve requires /v1/info',
+        'network not supplied; cannot bind network_id',
       ),
+    );
+  } else if (networkMismatch) {
+    checks.push(
+      fail(
+        'network_id',
+        'network_id equals verifier network',
+        `attestation network_id ${encodeHexLower(att.networkId)} ≠ ${suppliedNetwork}`,
+      ),
+    );
+  } else {
+    checks.push(
+      pass('network_id', 'network_id equals verifier network', `matches ${suppliedNetwork}`),
     );
   }
 
@@ -211,13 +207,20 @@ export function verifyBalanceAttestationBytes(
     ),
   );
 
-  if (subjectMismatch || assetMismatch) {
+  if (subjectMismatch || assetMismatch || networkMismatch || networkMissing) {
     const parts: string[] = [];
     if (subjectMismatch) {
       parts.push(`subject mismatch (attestation ${subjectHex} ≠ fragment ${fragSubjectHex})`);
     }
     if (assetMismatch) {
       parts.push(`asset_id mismatch (attestation ${assetHex} ≠ fragment ${fragment.assetIdHex})`);
+    }
+    if (networkMissing) {
+      parts.push('network not supplied; cannot bind network_id');
+    } else if (networkMismatch) {
+      parts.push(
+        `network_id mismatch (attestation ${encodeHexLower(att.networkId)} ≠ ${suppliedNetwork})`,
+      );
     }
     return {
       checks,
@@ -262,6 +265,19 @@ export async function resolveBalanceAttestation(
     }
   }
 
+  if (network === undefined) {
+    return {
+      checks: [
+        fail(
+          'network_id',
+          'network_id equals verifier network',
+          'network unresolved after /v1/info; cannot bind network_id',
+        ),
+      ],
+      fatalError: 'network unresolved after /v1/info; cannot bind network_id',
+    };
+  }
+
   let body: Uint8Array;
   let expectedHandle: Uint8Array | undefined;
 
@@ -294,8 +310,22 @@ export async function resolveBalanceAttestation(
       };
     }
     expectedHandle = fragment.attestationHandle;
-    const holders = parseBlobLocatorSet(fragment.holderHint);
-    if (holders.length === 0) {
+    const parsed = parseHolderLocators(fragment.holderHint);
+    if (parsed.status === 'invalid') {
+      return {
+        checks: [fail('obtain', 'Obtain BalanceAttestationV1 (content-addressed)', parsed.detail)],
+        fatalError: parsed.detail,
+      };
+    }
+    if (parsed.status === 'empty') {
+      const hintPresent = fragment.holderHint !== undefined && fragment.holderHint.length > 0;
+      if (hintPresent) {
+        const detail = 'holder hint is not a valid BlobLocatorSet';
+        return {
+          checks: [fail('obtain', 'Obtain BalanceAttestationV1 (content-addressed)', detail)],
+          fatalError: detail,
+        };
+      }
       return {
         checks: [
           fail(
@@ -307,6 +337,7 @@ export async function resolveBalanceAttestation(
         fatalError: 'BlobLocatorSet required for h: attestation form',
       };
     }
+    const holders = parsed.locators;
     try {
       const got = await fetchFromHolders(expectedHandle, holders, {
         signal,
@@ -327,18 +358,35 @@ export async function resolveBalanceAttestation(
     ...(expectedHandle !== undefined ? { expectedHandle } : {}),
   });
 
-  // Path-B probe for Pk_anchor — informational only.
+  // Path-B probe for Pk_anchor — leaf must match R_anchor; not a completed classification.
   if (view.fields !== undefined) {
     try {
       const nf = await fetchNf(view.fields.pkAnchorHex, { baseUrl, signal });
       if (nf.present) {
-        view.checks.push(
-          pass(
-            'anchor_path_b',
-            'Path-B probe for Pk_anchor',
-            `present at position ${nf.position}; not a completed classification`,
-          ),
-        );
+        if (nf.position === undefined) {
+          const detail = 'present: true without position — cannot bind to R_anchor';
+          view.fatalError = detail;
+          view.checks.push(fail('anchor_path_b', 'Path-B probe for Pk_anchor', detail));
+          view.fields = undefined;
+        } else if (nf.leaf === undefined) {
+          const detail = 'present: true without leaf — cannot bind to R_anchor';
+          view.fatalError = detail;
+          view.checks.push(fail('anchor_path_b', 'Path-B probe for Pk_anchor', detail));
+          view.fields = undefined;
+        } else if (nf.leaf === view.fields.rAnchorHex) {
+          view.checks.push(
+            pass(
+              'anchor_path_b',
+              'Path-B probe for Pk_anchor',
+              `present at position ${nf.position}; leaf matches R_anchor; not a completed classification`,
+            ),
+          );
+        } else {
+          const detail = `Path-B leaf ${nf.leaf} ≠ R_anchor ${view.fields.rAnchorHex}`;
+          view.fatalError = detail;
+          view.checks.push(fail('anchor_path_b', 'Path-B probe for Pk_anchor', detail));
+          view.fields = undefined;
+        }
       } else {
         view.checks.push(
           open(
@@ -350,9 +398,16 @@ export async function resolveBalanceAttestation(
       }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      view.checks.push(
-        open('anchor_path_b', 'Path-B probe for Pk_anchor', `lookup failed: ${detail}`),
-      );
+      // Malformed wire is fail-closed; transport/HTTP stays open with lookup-failed prefix.
+      if (err instanceof NodeApiError && err.code === 'malformed_response') {
+        view.fatalError = detail;
+        view.checks.push(fail('anchor_path_b', 'Path-B probe for Pk_anchor', detail));
+        view.fields = undefined;
+      } else {
+        view.checks.push(
+          open('anchor_path_b', 'Path-B probe for Pk_anchor', `lookup failed: ${detail}`),
+        );
+      }
     }
   }
 

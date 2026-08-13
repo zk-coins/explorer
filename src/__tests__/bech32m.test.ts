@@ -121,7 +121,7 @@ describe('Bech32m HRP parsing (§1.4 / §1.7.7)', () => {
     expect(() => decodeBech32m(withBad)).toThrow(/invalid Bech32m character/);
   });
 
-  it('rejects non-canonical padding on decode', () => {
+  it('rejects empty HRP and empty payload on encode', () => {
     // Craft words that fail convertBits pad=false: take valid encoding and
     // append an extra 5-bit group that leaves non-zero leftover bits.
     // Build HRP + data words with one extra non-zero padding word then re-checksum

@@ -3,6 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { fetchInscriptions, fetchNullifier } from '@/lib/api/client';
 import type { InscriptionEntry, InscriptionsResponse } from '@/lib/api/types';
 import { deserializeCoinProof, serializeCoinProof } from '@/lib/bundle/coinProof';
 import {
@@ -147,6 +148,7 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
     };
 
     const view = await resolveConfirmationLink(frag, {
+      maxInscriptionPages: 2,
       fetchInfo: async () => ({
         network: 'regtest',
         protocol_version: 'v1',
@@ -230,6 +232,7 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
         }
         return page2;
       },
+      { pageLimit: 200, maxPages: 50 },
     );
 
     expect(pagesScanned).toBe(2);
@@ -287,8 +290,453 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
 
     // Must not surface completed from the wrong R pair.
     expect(view.state).toBeUndefined();
-    expect(view.checks.find((c) => c.id === 'state_310')?.status).toBe('open');
+    expect(view.coin).toBeUndefined();
+    expect(view.creatingNullifier).toBeUndefined();
+    expect(view.navOpening).toBeUndefined();
+    expect(view.checks.find((c) => c.id === 'state_310')?.status).toBe('fail');
     expect(view.checks.find((c) => c.id === 'nullifier_r_match')?.status).toBe('fail');
+    expect(view.fatalError).toBeDefined();
+  });
+
+  it('Path-B R mismatch with correct inscription pair is fatal and does not set state', async () => {
+    const kTx = fill(32, 0x42);
+    const cp = sampleCoinProof(7);
+    const plain = serializeCoinProof(cp);
+    const { ciphertext, blobId } = zbeSeal(kTx, plain);
+    const pkHex = encodeHexLower(cp.creatingNullifier.pkCreate);
+    const rHex = encodeHexLower(cp.creatingNullifier.rCreate);
+    const wrongLeaf = 'ff'.repeat(32);
+
+    const view = await resolveConfirmationLink(
+      { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlob: async () => ciphertext,
+        fetchNullifier: async () => ({
+          present: true,
+          position: 0n,
+          leaf: wrongLeaf,
+          audit_path: [],
+          tree_size: 1n,
+          root: 'aa'.repeat(32),
+          tip_block_hash: 'bb'.repeat(32),
+          tip_height: 100n,
+        }),
+        fetchInscriptions: async () => ({
+          inscriptions: [
+            {
+              txid: '99'.repeat(32),
+              height: 90n,
+              tx_index: 0,
+              vin_index: 0,
+              count: 1,
+              format: 1,
+              confirmation_state: 'completed',
+              // Correct (Pk, R_create) — must still not set state under Path-B R mismatch.
+              nullifiers: [{ pubkey: pkHex, r: rHex, state: 'completed' }],
+            },
+          ],
+        }),
+      },
+    );
+
+    expect(view.state).toBeUndefined();
+    expect(view.coin).toBeUndefined();
+    expect(view.creatingNullifier).toBeUndefined();
+    expect(view.navOpening).toBeUndefined();
+    expect(view.anchoring?.confirmations).toBeUndefined();
+    expect(view.checks.find((c) => c.id === 'nullifier_r_match')?.status).toBe('fail');
+    expect(view.checks.find((c) => c.id === 'state_310')?.status).toBe('fail');
+    expect(view.fatalError).toBeDefined();
+  });
+
+  it('Path-B present without position with correct inscription pair is fatal and does not set state', async () => {
+    const kTx = fill(32, 0x42);
+    const cp = sampleCoinProof(7);
+    const plain = serializeCoinProof(cp);
+    const { ciphertext, blobId } = zbeSeal(kTx, plain);
+    const pkHex = encodeHexLower(cp.creatingNullifier.pkCreate);
+    const rHex = encodeHexLower(cp.creatingNullifier.rCreate);
+
+    const view = await resolveConfirmationLink(
+      { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlob: async () => ciphertext,
+        fetchNullifier: async () => ({
+          present: true,
+          leaf: rHex,
+          audit_path: [],
+          tree_size: 1n,
+          root: 'aa'.repeat(32),
+          tip_block_hash: 'bb'.repeat(32),
+          tip_height: 100n,
+        }),
+        fetchInscriptions: async () => ({
+          inscriptions: [
+            {
+              txid: '99'.repeat(32),
+              height: 90n,
+              tx_index: 0,
+              vin_index: 0,
+              count: 1,
+              format: 1,
+              confirmation_state: 'completed',
+              nullifiers: [{ pubkey: pkHex, r: rHex, state: 'completed' }],
+            },
+          ],
+        }),
+      },
+    );
+
+    expect(view.state).toBeUndefined();
+    expect(view.coin).toBeUndefined();
+    expect(view.creatingNullifier).toBeUndefined();
+    expect(view.navOpening).toBeUndefined();
+    expect(view.anchoring?.confirmations).toBeUndefined();
+    expect(view.checks.find((c) => c.id === 'nullifier_path_b')?.status).toBe('fail');
+    expect(view.checks.find((c) => c.id === 'state_310')?.status).toBe('fail');
+    expect(view.fatalError).toBeDefined();
+  });
+
+  it('Path-B malformed wire response (present without position) is fatal and does not set state from inscriptions', async () => {
+    const kTx = fill(32, 0x44);
+    const cp = sampleCoinProof(9);
+    const plain = serializeCoinProof(cp);
+    const { ciphertext, blobId } = zbeSeal(kTx, plain);
+    const pkHex = encodeHexLower(cp.creatingNullifier.pkCreate);
+    const rHex = encodeHexLower(cp.creatingNullifier.rCreate);
+
+    const view = await resolveConfirmationLink(
+      { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlob: async () => ciphertext,
+        // Real fetch/parse path: present:true without position/leaf → NodeApiError malformed_response.
+        fetchNullifier: (pk, opts) =>
+          fetchNullifier(pk, {
+            ...opts,
+            fetchImpl: async () =>
+              new Response(
+                JSON.stringify({
+                  present: true,
+                  audit_path: [],
+                  tree_size: '1',
+                  root: 'aa'.repeat(32),
+                  tip_block_hash: 'bb'.repeat(32),
+                  tip_height: '100',
+                }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } },
+              ),
+          }),
+        fetchInscriptions: async () => ({
+          inscriptions: [
+            {
+              txid: '99'.repeat(32),
+              height: 90n,
+              tx_index: 0,
+              vin_index: 0,
+              count: 1,
+              format: 1,
+              confirmation_state: 'completed',
+              nullifiers: [{ pubkey: pkHex, r: rHex, state: 'completed' }],
+            },
+          ],
+        }),
+      },
+    );
+
+    expect(view.fatalError).toBeDefined();
+    expect(view.state).toBeUndefined();
+    expect(view.coin).toBeUndefined();
+    expect(view.creatingNullifier).toBeUndefined();
+    expect(view.navOpening).toBeUndefined();
+    expect(view.checks.find((c) => c.id === 'state_310')?.status).toBe('fail');
+    expect(view.checks.find((c) => c.id === 'nullifier_path_b')?.status).toBe('fail');
+  });
+
+  it('inscriptions malformed_response is fail-closed on state_310', async () => {
+    const kTx = fill(32, 0x46);
+    const cp = sampleCoinProof(11);
+    const plain = serializeCoinProof(cp);
+    const { ciphertext, blobId } = zbeSeal(kTx, plain);
+
+    const view = await resolveConfirmationLink(
+      { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlob: async () => ciphertext,
+        // present:false → Path-B stays open; inscriptions path is reached.
+        fetchNullifier: async () => ({
+          present: false,
+          audit_path: [],
+          tree_size: 1n,
+          root: 'bb'.repeat(32),
+          tip_block_hash: 'cc'.repeat(32),
+          tip_height: 100n,
+        }),
+        // Real parser: JSON null → NodeApiError malformed_response.
+        fetchInscriptions: (opts) =>
+          fetchInscriptions({
+            ...opts,
+            fetchImpl: async () =>
+              new Response(JSON.stringify(null), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+              }),
+          }),
+      },
+    );
+
+    const state310 = view.checks.find((c) => c.id === 'state_310');
+    expect(state310?.status).toBe('fail');
+    expect(state310?.detail).toMatch(/inscriptions/);
+    expect(state310?.detail).toMatch(/not an object/);
+    expect(state310?.detail).not.toMatch(/^Could not load inscriptions:/);
+    expect(view.fatalError).toBeDefined();
+    expect(view.fatalError).toBe(state310?.detail);
+    expect(view.state).toBeUndefined();
+    expect(view.coin).toBeUndefined();
+    expect(view.creatingNullifier).toBeUndefined();
+    expect(view.navOpening).toBeUndefined();
+  });
+
+  it('inscriptions transport error stays open on state_310', async () => {
+    const kTx = fill(32, 0x46);
+    const cp = sampleCoinProof(11);
+    const plain = serializeCoinProof(cp);
+    const { ciphertext, blobId } = zbeSeal(kTx, plain);
+
+    const view = await resolveConfirmationLink(
+      { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlob: async () => ciphertext,
+        // present:false → Path-B stays open; inscriptions path is reached.
+        fetchNullifier: async () => ({
+          present: false,
+          audit_path: [],
+          tree_size: 1n,
+          root: 'bb'.repeat(32),
+          tip_block_hash: 'cc'.repeat(32),
+          tip_height: 100n,
+        }),
+        fetchInscriptions: async () => {
+          throw new Error('ECONNRESET');
+        },
+      },
+    );
+
+    const state310 = view.checks.find((c) => c.id === 'state_310');
+    expect(state310?.status).toBe('open');
+    expect(state310?.detail).toMatch(/^Could not load inscriptions:/);
+    expect(view.fatalError).toBeUndefined();
+    expect(view.state).toBeUndefined();
+  });
+
+  it('Path-B inconsistency fails state_310 without fetching inscriptions', async () => {
+    const pathNames = [
+      'present without position',
+      'present without leaf',
+      'malformed_response (parser throws)',
+      'leaf mismatch',
+    ] as const;
+
+    for (const pathName of pathNames) {
+      const kTx = fill(32, 0x45);
+      const cp = sampleCoinProof(10);
+      const plain = serializeCoinProof(cp);
+      const { ciphertext, blobId } = zbeSeal(kTx, plain);
+      const rHex = encodeHexLower(cp.creatingNullifier.rCreate);
+
+      let inscCalls = 0;
+      const fetchInscriptions = async () => {
+        inscCalls += 1;
+        throw new Error('inscriptions must not be fetched');
+      };
+
+      const fetchNf =
+        pathName === 'present without position'
+          ? async () => ({
+              present: true as const,
+              leaf: rHex,
+              audit_path: [] as string[],
+              tree_size: 1n,
+              root: 'aa'.repeat(32),
+              tip_block_hash: 'bb'.repeat(32),
+              tip_height: 100n,
+            })
+          : pathName === 'present without leaf'
+            ? async () => ({
+                present: true as const,
+                position: 0n,
+                audit_path: [] as string[],
+                tree_size: 1n,
+                root: 'aa'.repeat(32),
+                tip_block_hash: 'bb'.repeat(32),
+                tip_height: 100n,
+              })
+            : pathName === 'malformed_response (parser throws)'
+              ? (pk: string, opts?: Parameters<typeof fetchNullifier>[1]) =>
+                  fetchNullifier(pk, {
+                    ...opts,
+                    fetchImpl: async () =>
+                      new Response(
+                        JSON.stringify({
+                          present: true,
+                          audit_path: [],
+                          tree_size: '1',
+                          root: 'aa'.repeat(32),
+                          tip_block_hash: 'bb'.repeat(32),
+                          tip_height: '100',
+                        }),
+                        { status: 200, headers: { 'Content-Type': 'application/json' } },
+                      ),
+                  })
+              : async () => ({
+                  present: true as const,
+                  position: 0n,
+                  leaf: 'ff'.repeat(32),
+                  audit_path: [] as string[],
+                  tree_size: 1n,
+                  root: 'aa'.repeat(32),
+                  tip_block_hash: 'bb'.repeat(32),
+                  tip_height: 100n,
+                });
+
+      const view = await resolveConfirmationLink(
+        { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
+        {
+          fetchInfo: async () => ({
+            network: 'regtest',
+            protocol_version: 'v1',
+            finality_confirmations: 6,
+            activation_height: 0n,
+            max_blob_bytes: 1_048_576n,
+            features: [],
+          }),
+          fetchBlob: async () => ciphertext,
+          fetchNullifier: fetchNf,
+          fetchInscriptions,
+        },
+      );
+
+      const state310Detail = view.checks.find((ch) => ch.id === 'state_310')?.detail;
+      expect(view.checks.find((ch) => ch.id === 'state_310')?.status, pathName).toBe('fail');
+      if (pathName === 'present without position') {
+        expect(state310Detail, pathName).toContain(
+          'Path-B present without position — cannot bind to R_create',
+        );
+      } else if (pathName === 'present without leaf') {
+        expect(state310Detail, pathName).toContain(
+          'Path-B present without leaf — cannot bind to R_create',
+        );
+      } else if (pathName === 'malformed_response (parser throws)') {
+        // Parser detail (err.message), not the NodeApiError.code string.
+        expect(state310Detail, pathName).toContain('nullifier (present)');
+        expect(state310Detail, pathName).toContain('position');
+      } else {
+        expect(state310Detail, pathName).toContain('Path-B leaf');
+        expect(state310Detail, pathName).toContain('≠ R_create');
+      }
+      expect(view.state, pathName).toBeUndefined();
+      expect(view.coin, pathName).toBeUndefined();
+      expect(view.creatingNullifier, pathName).toBeUndefined();
+      expect(view.navOpening, pathName).toBeUndefined();
+      expect(view.fatalError, pathName).toBeDefined();
+      expect(inscCalls, pathName).toBe(0);
+    }
+  });
+
+  it('reveal height above tip is fatal and does not set confirmations or state', async () => {
+    const kTx = fill(32, 0x43);
+    const cp = sampleCoinProof(8);
+    const plain = serializeCoinProof(cp);
+    const { ciphertext, blobId } = zbeSeal(kTx, plain);
+    const pkHex = encodeHexLower(cp.creatingNullifier.pkCreate);
+    const rHex = encodeHexLower(cp.creatingNullifier.rCreate);
+
+    const view = await resolveConfirmationLink(
+      { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
+      {
+        fetchInfo: async () => ({
+          network: 'regtest',
+          protocol_version: 'v1',
+          finality_confirmations: 6,
+          activation_height: 0n,
+          max_blob_bytes: 1_048_576n,
+          features: [],
+        }),
+        fetchBlob: async () => ciphertext,
+        fetchNullifier: async () => ({
+          present: true,
+          position: 0n,
+          leaf: rHex,
+          audit_path: [],
+          tree_size: 1n,
+          root: 'aa'.repeat(32),
+          tip_block_hash: 'bb'.repeat(32),
+          tip_height: 100n,
+        }),
+        fetchInscriptions: async () => ({
+          inscriptions: [
+            {
+              txid: '99'.repeat(32),
+              height: 200n,
+              tx_index: 0,
+              vin_index: 0,
+              count: 1,
+              format: 1,
+              confirmation_state: 'completed',
+              nullifiers: [{ pubkey: pkHex, r: rHex, state: 'completed' }],
+            },
+          ],
+        }),
+      },
+    );
+
+    expect(view.state).toBeUndefined();
+    expect(view.coin).toBeUndefined();
+    expect(view.creatingNullifier).toBeUndefined();
+    expect(view.navOpening).toBeUndefined();
+    expect(view.anchoring?.confirmations).toBeUndefined();
+    expect(view.checks.find((c) => c.id === 'state_310')?.status).toBe('fail');
+    expect(view.fatalError).toBeDefined();
   });
 
   it('parseHolderHint via resolveConfirmationLink holders path + full success state', async () => {
@@ -379,14 +827,14 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
     const plain = serializeCoinProof(cp);
     const { ciphertext, blobId } = zbeSeal(kTx, plain);
 
-    // Comma-separated holders.
+    // Comma-separated holders (all valid http(s)).
     const v1 = await resolveConfirmationLink(
       {
         status: 'ok',
         kind: 'tx',
         bundle: blobId,
         view: kTx,
-        holderHint: 'http://a.example, not-a-url, https://b.example',
+        holderHint: 'http://a.example, https://b.example',
       },
       {
         fetchInfo: async () => ({
@@ -477,6 +925,90 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
     expect(v3.checks.find((c) => c.id === 'fetch_blob')?.detail).toMatch(/node Blossom/);
   });
 
+  it('holderHint with invalid locator fails closed before any blob fetch', async () => {
+    const kTx = fill(32, 0x52);
+    const cp = sampleCoinProof(21);
+    const plain = serializeCoinProof(cp);
+    const { blobId } = zbeSeal(kTx, plain);
+
+    let fetchFromHoldersCalled = false;
+    let fetchBlobCalled = false;
+    const view = await resolveConfirmationLink(
+      {
+        status: 'ok',
+        kind: 'tx',
+        bundle: blobId,
+        view: kTx,
+        holderHint: 'http://a.example, not-a-url, https://b.example',
+      },
+      {
+        fetchInfo: async () => {
+          throw new Error('fetchInfo must not run on invalid holder hint');
+        },
+        fetchBlobFromHolders: async () => {
+          fetchFromHoldersCalled = true;
+          throw new Error('holders must not be called');
+        },
+        fetchBlob: async () => {
+          fetchBlobCalled = true;
+          throw new Error('node blob must not be called');
+        },
+      },
+    );
+
+    expect(view.fatalError).toBe('holder hint contains an invalid locator at index 1');
+    expect(view.checks.find((c) => c.id === 'fetch_blob')?.status).toBe('fail');
+    expect(view.checks.find((c) => c.id === 'fetch_blob')?.detail).toBe(
+      'holder hint contains an invalid locator at index 1',
+    );
+    expect(fetchFromHoldersCalled).toBe(false);
+    expect(fetchBlobCalled).toBe(false);
+    expect(view.coin).toBeUndefined();
+    expect(view.creatingNullifier).toBeUndefined();
+    expect(view.navOpening).toBeUndefined();
+    expect(view.state).toBeUndefined();
+  });
+
+  it('@https:// invalid holderHint fails closed before network', async () => {
+    const kTx = fill(32, 0x58);
+    const plain = serializeCoinProof(sampleCoinProof(26));
+    const { blobId } = zbeSeal(kTx, plain);
+
+    let fetchFromHoldersCalled = false;
+    let fetchBlobCalled = false;
+    const view = await resolveConfirmationLink(
+      {
+        status: 'ok',
+        kind: 'tx',
+        bundle: blobId,
+        view: kTx,
+        holderHint: '@https://',
+      },
+      {
+        fetchInfo: async () => {
+          throw new Error('fetchInfo must not run');
+        },
+        fetchBlobFromHolders: async () => {
+          fetchFromHoldersCalled = true;
+          throw new Error('holders must not be called');
+        },
+        fetchBlob: async () => {
+          fetchBlobCalled = true;
+          throw new Error('node blob must not be called');
+        },
+      },
+    );
+
+    expect(view.fatalError).toBe('holder hint contains an invalid locator');
+    expect(view.checks.find((c) => c.id === 'fetch_blob')?.status).toBe('fail');
+    expect(view.checks.find((c) => c.id === 'fetch_blob')?.detail).toBe(
+      'holder hint contains an invalid locator',
+    );
+    expect(fetchFromHoldersCalled).toBe(false);
+    expect(fetchBlobCalled).toBe(false);
+    expect(view.coin).toBeUndefined();
+  });
+
   it('openConfirmationBlob ZbeError with chunkIndex path', () => {
     const kTx = fill(32, 0x53);
     const { ciphertext, blobId } = zbeSeal(kTx, new TextEncoder().encode('x'));
@@ -492,10 +1024,13 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
     expect(badLength.fatalError).not.toMatch(/chunk/);
   });
 
-  it('@-prefixed non-http holderHint falls through to empty list (node Blossom path)', async () => {
+  it('@ftp:// holderHint fails closed before any blob fetch', async () => {
     const kTx = fill(32, 0x56);
     const plain = serializeCoinProof(sampleCoinProof(24));
-    const { ciphertext, blobId } = zbeSeal(kTx, plain);
+    const { blobId } = zbeSeal(kTx, plain);
+
+    let fetchFromHoldersCalled = false;
+    let fetchBlobCalled = false;
     const view = await resolveConfirmationLink(
       {
         status: 'ok',
@@ -505,32 +1040,28 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
         holderHint: '@ftp://not-http.example',
       },
       {
-        fetchInfo: async () => ({
-          network: 'regtest',
-          protocol_version: 'v1',
-          finality_confirmations: 6,
-          activation_height: 0n,
-          max_blob_bytes: 1_048_576n,
-          features: [],
-        }),
-        fetchBlob: async () => ciphertext,
-        fetchNullifier: async () => ({
-          present: false,
-          audit_path: [],
-          tree_size: 0n,
-          root: 'aa'.repeat(32),
-          tip_block_hash: 'bb'.repeat(32),
-          tip_height: 1n,
-        }),
-        fetchInscriptions: async () => ({ inscriptions: [] }),
+        fetchInfo: async () => {
+          throw new Error('fetchInfo must not run');
+        },
+        fetchBlobFromHolders: async () => {
+          fetchFromHoldersCalled = true;
+          throw new Error('holders must not be called');
+        },
+        fetchBlob: async () => {
+          fetchBlobCalled = true;
+          throw new Error('node blob must not be called');
+        },
       },
     );
-    expect(view.checks.find((c) => c.id === 'fetch_blob')?.detail).toMatch(
-      /Fetched from node Blossom base/,
+
+    expect(view.fatalError).toBe('holder hint contains an invalid locator');
+    expect(view.checks.find((c) => c.id === 'fetch_blob')?.status).toBe('fail');
+    expect(view.checks.find((c) => c.id === 'fetch_blob')?.detail).toBe(
+      'holder hint contains an invalid locator',
     );
-    expect(view.checks.find((c) => c.id === 'fetch_blob')?.detail).not.toMatch(
-      /Fetched from holder/,
-    );
+    expect(fetchFromHoldersCalled).toBe(false);
+    expect(fetchBlobCalled).toBe(false);
+    expect(view.coin).toBeUndefined();
   });
 
   it('accepts an @-prefixed http holder URL', async () => {
@@ -712,6 +1243,7 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
         'aa'.repeat(32),
         'bb'.repeat(32),
         async () => partial,
+        { pageLimit: 200, maxPages: 50 },
       );
       expect(stopped.pagesScanned).toBe(1);
     }
@@ -831,8 +1363,43 @@ describe('§5.6 Path-B honesty + inscription pagination', () => {
         fetchInscriptions: async () => ({ inscriptions: [] }),
       },
     );
-    expect(noLeaf.checks.find((c) => c.id === 'nullifier_path_b')?.status).toBe('pass');
-    expect(noLeaf.checks.find((c) => c.id === 'nullifier_r_match')).toBeUndefined();
+    expect(noLeaf.checks.find((c) => c.id === 'nullifier_path_b')?.status).toBe('fail');
+    expect(noLeaf.checks.find((c) => c.id === 'nullifier_r_match')?.status).toBe('fail');
+    expect(noLeaf.fatalError).toBeDefined();
+    expect(noLeaf.state).toBeUndefined();
+    expect(noLeaf.coin).toBeUndefined();
+    expect(noLeaf.creatingNullifier).toBeUndefined();
+    expect(noLeaf.navOpening).toBeUndefined();
+    expect(noLeaf.anchoring?.confirmations).toBeUndefined();
+
+    const matchLeafNoPosition = await resolveConfirmationLink(
+      { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
+      {
+        ...common,
+        fetchNullifier: async () => ({
+          present: true,
+          leaf: encodeHexLower(cp.creatingNullifier.rCreate),
+          audit_path: [],
+          tree_size: 1n,
+          root: 'aa'.repeat(32),
+          tip_block_hash: 'bb'.repeat(32),
+          tip_height: 10n,
+        }),
+        fetchInscriptions: async () => ({ inscriptions: [] }),
+      },
+    );
+    expect(matchLeafNoPosition.checks.find((c) => c.id === 'nullifier_path_b')?.status).toBe(
+      'fail',
+    );
+    expect(matchLeafNoPosition.checks.find((c) => c.id === 'nullifier_r_match')?.status).toBe(
+      'fail',
+    );
+    expect(matchLeafNoPosition.fatalError).toBeDefined();
+    expect(matchLeafNoPosition.state).toBeUndefined();
+    expect(matchLeafNoPosition.coin).toBeUndefined();
+    expect(matchLeafNoPosition.creatingNullifier).toBeUndefined();
+    expect(matchLeafNoPosition.navOpening).toBeUndefined();
+    expect(matchLeafNoPosition.anchoring?.confirmations).toBeUndefined();
 
     const hitWithoutTip = await resolveConfirmationLink(
       { status: 'ok', kind: 'tx', bundle: blobId, view: kTx },
