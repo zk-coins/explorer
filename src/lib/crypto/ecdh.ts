@@ -54,7 +54,12 @@ export function ecdhSharedX(scalar: Uint8Array, peerXonly: Uint8Array): Uint8Arr
   try {
     peer = liftX(bytesToBigint(peerXonly));
   } catch (err) {
-    const msg = err instanceof Error ? err.message : /* v8 ignore next -- liftX and bytesToBigint only throw Error subclasses for every Uint8Array input accepted above */ String(err);
+    const msg =
+      err instanceof Error
+        ? err.message
+        : /* v8 ignore next -- liftX and bytesToBigint only throw Error subclasses for every Uint8Array input accepted above */ String(
+            err,
+          );
     throw new EcdhError(`peer x-only is not a valid curve point: ${msg}`);
   }
 

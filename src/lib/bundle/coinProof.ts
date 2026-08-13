@@ -215,7 +215,12 @@ function requireCanonicalDigest(bytes: Uint8Array, field: string): void {
   try {
     digestFromBytes(bytes);
   } catch (err) {
-    const detail = err instanceof Error ? err.message : /* v8 ignore next -- SDK digestFromBytes only throws Error subclasses for malformed digest bytes */ String(err);
+    const detail =
+      err instanceof Error
+        ? err.message
+        : /* v8 ignore next -- SDK digestFromBytes only throws Error subclasses for malformed digest bytes */ String(
+            err,
+          );
     throw new CoinProofError(`${field}: non-canonical digest: ${detail}`);
   }
 }
@@ -225,7 +230,12 @@ function requireXOnlyPoint(bytes: Uint8Array, field: string): void {
   try {
     liftXOnly(bytes, field);
   } catch (err) {
-    const detail = err instanceof Error ? err.message : /* v8 ignore next -- SDK liftXOnly only throws Error subclasses for non-liftable x-only bytes */ String(err);
+    const detail =
+      err instanceof Error
+        ? err.message
+        : /* v8 ignore next -- SDK liftXOnly only throws Error subclasses for non-liftable x-only bytes */ String(
+            err,
+          );
     throw new CoinProofError(`${field}: invalid x-only curve point: ${detail}`);
   }
 }

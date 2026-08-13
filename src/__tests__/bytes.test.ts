@@ -79,9 +79,7 @@ describe('crypto/bytes', () => {
     expect(() => base64UrlDecodeNoPad('')).toThrow(/empty/);
     expect(() => base64UrlDecodeNoPad('!!!')).toThrow(/non-alphabet/);
     expect(() => base64UrlDecodeNoPad('YWJj', { maxDecodedBytes: 0 })).toThrow(/maxDecodedBytes/);
-    expect(() => base64UrlDecodeNoPad('YWJj', { maxDecodedBytes: 1.5 })).toThrow(
-      /maxDecodedBytes/,
-    );
+    expect(() => base64UrlDecodeNoPad('YWJj', { maxDecodedBytes: 1.5 })).toThrow(/maxDecodedBytes/);
     expect(() =>
       base64UrlDecodeNoPad('YWJj', { maxDecodedBytes: Number.MAX_SAFE_INTEGER + 1 }),
     ).toThrow(/maxDecodedBytes/);
