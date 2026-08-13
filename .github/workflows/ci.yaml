@@ -69,16 +69,15 @@ jobs:
         with:
           path: explorer
 
-      # Pin the SDK to the v1 branch that carries the exports the explorer
+      # Pin the SDK to a commit SHA that carries the exports the explorer
       # imports (detectTag, digestToBytes, assetIdV1, …). Without a ref this
       # checks out the SDK default branch, which predates the v1 surface and
-      # fails typecheck. Flip to the published `@zkcoins/sdk` version once it
-      # is released.
+      # fails typecheck. Pinned until a released `@zkcoins/sdk` version exists.
       - name: Checkout SDK (file:../sdk)
         uses: actions/checkout@v4
         with:
           repository: zk-coins/sdk
-          ref: feat/v1-cross-parity
+          ref: 8894cfb363e74bdd2ec27b33ec53e72057ee527e
           path: sdk
 
       # No `.nvmrc` and no `engines.node` pin in package.json. Node 22 is
@@ -168,7 +167,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: zk-coins/sdk
-          ref: feat/v1-cross-parity
+          ref: 8894cfb363e74bdd2ec27b33ec53e72057ee527e
           path: sdk
 
       - name: Setup Node.js

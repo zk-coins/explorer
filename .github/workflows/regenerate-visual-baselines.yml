@@ -66,11 +66,12 @@ jobs:
           path: explorer
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Pinned to a commit SHA until a released `@zkcoins/sdk` version exists.
       - name: Checkout SDK (file:../sdk)
         uses: actions/checkout@v4
         with:
           repository: zk-coins/sdk
-          ref: feat/v1-cross-parity
+          ref: 8894cfb363e74bdd2ec27b33ec53e72057ee527e
           path: sdk
 
       - name: Setup Node.js
