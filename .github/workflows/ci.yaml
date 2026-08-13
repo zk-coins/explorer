@@ -208,6 +208,7 @@ jobs:
         env:
           NEXT_PUBLIC_NODE_BASE_URL: https://ci-node.example.invalid
           CI: 'true'
+          HOME: /root
 
       - name: Upload playwright report
         if: always()

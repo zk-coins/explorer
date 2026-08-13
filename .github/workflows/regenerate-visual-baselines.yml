@@ -114,6 +114,7 @@ jobs:
           SPEC_GLOB: ${{ inputs.spec_glob }}
           TOLERATE: ${{ inputs.tolerate_failures }}
           CI: 'true'
+          HOME: /root
         run: |
           set -euo pipefail
           # $SPEC_GLOB is intentionally unquoted so the shell expands
