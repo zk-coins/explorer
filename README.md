@@ -41,7 +41,7 @@ It offers **no** publisher and **no** wallet API. It MAY reuse [`@zkcoins/sdk`](
 | --------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `NEXT_PUBLIC_NODE_BASE_URL` | **yes** (no default) | Absolute origin of the node/API REST base the explorer reads (e.g. `https://node.example.com`). The build **fails** if it is unset or not an `http(s)` URL. |
 
-Local layout matches the monorepo: `@zkcoins/sdk` is `file:../sdk`. Build the sibling SDK first (`npm ci && npm run build` in `../sdk`), then:
+Local layout matches the monorepo: `@zkcoins/sdk` is `file:../sdk`. Build the sibling SDK first (`npm ci && npm run build` in `../sdk`), then proceed with the commands below. CI pins SDK commit `8894cfb363e74bdd2ec27b33ec53e72057ee527e` until a released SDK exists.
 
 ```bash
 export NEXT_PUBLIC_NODE_BASE_URL=https://node.example.com

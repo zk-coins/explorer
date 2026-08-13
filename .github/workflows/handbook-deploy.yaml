@@ -60,6 +60,12 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${HANDBOOK_HTPASSWD}" > handbook.htpasswd
+          # Reject the committed local-dev Laravel dummy bcrypt hash so a
+          # deploy cannot ship the placeholder credential.
+          if grep -qF '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi' handbook.htpasswd; then
+            echo "::error::HANDBOOK_HTPASSWD secret contains the committed local-dev dummy bcrypt hash / placeholder — refusing to deploy" >&2
+            exit 1
+          fi
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -143,6 +149,12 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${HANDBOOK_HTPASSWD}" > handbook.htpasswd
+          # Reject the committed local-dev Laravel dummy bcrypt hash so a
+          # deploy cannot ship the placeholder credential.
+          if grep -qF '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi' handbook.htpasswd; then
+            echo "::error::HANDBOOK_HTPASSWD secret contains the committed local-dev dummy bcrypt hash / placeholder — refusing to deploy" >&2
+            exit 1
+          fi
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3

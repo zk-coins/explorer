@@ -8,7 +8,8 @@
 ## What belongs here
 
 - The **stateless presentation surface**: no keys, no private state, no wallet
-  API, no publisher. Everything shown is read from a node's public endpoints.
+  API, no publisher. Public mode reads a node's public endpoints; authorised /
+  bearer views may also fetch Blossom blobs from holders.
 - **Public mode** (AggregateStateNullifierV3 inscription stream, nullifier
   accumulator, aggregate counts, Path-B nullifier lookup) and routes for
   **authorised / bearer** views (`zkview` / `zkavk` / `zkatt` / `zkbid` fragment

@@ -30,6 +30,30 @@ describe('config.ts fail-closed NODE_BASE_URL', () => {
     await expect(import('@/lib/config')).rejects.toThrow(/http/);
   });
 
+  it('throws when URL contains userinfo', async () => {
+    process.env.NEXT_PUBLIC_NODE_BASE_URL = 'https://user:pass@node.example.invalid';
+    vi.resetModules();
+    await expect(import('@/lib/config')).rejects.toThrow(/userinfo/);
+  });
+
+  it('throws when URL contains a query string', async () => {
+    process.env.NEXT_PUBLIC_NODE_BASE_URL = 'https://node.example.invalid?x=1';
+    vi.resetModules();
+    await expect(import('@/lib/config')).rejects.toThrow(/query/);
+  });
+
+  it('throws when URL contains a fragment', async () => {
+    process.env.NEXT_PUBLIC_NODE_BASE_URL = 'https://node.example.invalid#frag';
+    vi.resetModules();
+    await expect(import('@/lib/config')).rejects.toThrow(/fragment/);
+  });
+
+  it('throws when hostname is empty', async () => {
+    process.env.NEXT_PUBLIC_NODE_BASE_URL = 'https:///nohost';
+    vi.resetModules();
+    await expect(import('@/lib/config')).rejects.toThrow(/hostname/);
+  });
+
   it('exports stripped base URL when valid', async () => {
     process.env.NEXT_PUBLIC_NODE_BASE_URL = 'https://node.example.invalid///';
     vi.resetModules();

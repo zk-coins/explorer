@@ -11,9 +11,37 @@ function readNodeBaseUrl(): string {
   if (typeof raw !== 'string' || raw.length === 0) {
     throw new Error('NEXT_PUBLIC_NODE_BASE_URL is not set. The explorer has no default node URL.');
   }
-  if (!/^https?:\/\//.test(raw)) {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
     throw new Error(
-      `NEXT_PUBLIC_NODE_BASE_URL must start with http:// or https://, got ${JSON.stringify(raw)}`,
+      `NEXT_PUBLIC_NODE_BASE_URL is not a valid absolute URL, got ${JSON.stringify(raw)}`,
+    );
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(
+      `NEXT_PUBLIC_NODE_BASE_URL must use http or https protocol, got ${JSON.stringify(raw)}`,
+    );
+  }
+  if (!parsed.hostname) {
+    throw new Error(
+      `NEXT_PUBLIC_NODE_BASE_URL hostname must be non-empty, got ${JSON.stringify(raw)}`,
+    );
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error(
+      `NEXT_PUBLIC_NODE_BASE_URL must not include userinfo credentials, got ${JSON.stringify(raw)}`,
+    );
+  }
+  if (parsed.search) {
+    throw new Error(
+      `NEXT_PUBLIC_NODE_BASE_URL must not include a query string, got ${JSON.stringify(raw)}`,
+    );
+  }
+  if (parsed.hash) {
+    throw new Error(
+      `NEXT_PUBLIC_NODE_BASE_URL must not include a fragment, got ${JSON.stringify(raw)}`,
     );
   }
   // Strip trailing slashes so path joins are unambiguous.
