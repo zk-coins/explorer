@@ -49,7 +49,9 @@ describe('config.ts fail-closed NODE_BASE_URL', () => {
   });
 
   it('throws when hostname is empty', async () => {
-    process.env.NEXT_PUBLIC_NODE_BASE_URL = 'https:///nohost';
+    // WHATWG collapses `https:///nohost` to host `nohost`. Three slashes
+    // and no host (`https:///`) is the empty-hostname case.
+    process.env.NEXT_PUBLIC_NODE_BASE_URL = 'https:///';
     vi.resetModules();
     await expect(import('@/lib/config')).rejects.toThrow(/hostname/);
   });
