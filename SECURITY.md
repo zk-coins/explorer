@@ -11,14 +11,14 @@ If you discover a security vulnerability in zkCoins, please report it responsibl
 
 ## Scope
 
-| Component                                          | In Scope |
-| -------------------------------------------------- | -------- |
-| Client-side view-capability handling (`zkview` / `zkavk`) | Yes |
-| Client-side decryption of authorised disclosures   | Yes      |
-| Verification of confirmations against Bitcoin      | Yes      |
-| Rendering of untrusted chain data (XSS etc.)       | Yes      |
+| Component                                                              | In Scope     |
+| ---------------------------------------------------------------------- | ------------ |
+| Client-side view-capability handling (`zkview` / `zkavk`)              | Yes          |
+| Client-side decryption of authorised disclosures                       | Yes          |
+| Verification of confirmations against Bitcoin                          | Yes          |
+| Rendering of untrusted chain data (XSS etc.)                           | Yes          |
 | Node endpoints (see [zk-coins/node](https://github.com/zk-coins/node)) | Report there |
-| Documentation                                      | No       |
+| Documentation                                                          | No           |
 
 ## Supported Versions
 

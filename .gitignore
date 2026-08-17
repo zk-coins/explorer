@@ -14,3 +14,16 @@ coverage/
 
 # OS / editor
 .DS_Store
+
+# Test artifacts
+test-results/
+playwright-report/
+
+# Per-run E2E fixtures written by e2e/_global-setup.ts (bearer-link material).
+e2e/.fixtures/
+
+# Handbook screenshots are derived artifacts — scripts/sync-handbook-baselines.mjs
+# hardlinks them from e2e/*.spec.ts-snapshots/ at predev/prebuild time.
+# Keep the canonical baselines in e2e/ as the single source of truth.
+public/handbook/screenshots/*
+!public/handbook/screenshots/.gitkeep

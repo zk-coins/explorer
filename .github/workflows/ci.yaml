@@ -1,0 +1,226 @@
+name: CI
+
+on:
+  workflow_dispatch:
+
+  # CI runs on every pull request regardless of target branch. This
+  # makes the default safe for stacked PRs (PR-A → PR-B → PR-C where
+  # each PR's base is the previous PR's branch) and any other workflow
+  # that opens a PR against a non-`develop` branch — previously such
+  # PRs were silently skipped because `branches: [develop]` filtered
+  # them out, and the only fix was to hand-edit ci.yaml on each new
+  # feature stack.
+  #
+  # `push: develop` is intentionally absent. Every commit reaching
+  # `develop` is already covered by an open PR's `synchronize` event;
+  # adding `on: push: branches: [develop]` would queue a second
+  # workflow instance on the same SHA. (Under the PR-number grouping
+  # in the concurrency block below the two runs would land in
+  # DIFFERENT groups — push keyed by `refs/heads/develop`, PR keyed
+  # by the PR's number — so the block would not deduplicate them.)
+  #
+  # `ready_for_review` is added so the workflow fires the moment a
+  # draft PR is marked ready — drafts themselves skip CI via the
+  # `if:` guard on the job (saves runner time while work is still in
+  # progress).
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  # Group by PR number so a new push to the same PR cancels the
+  # in-flight run on the outdated commit. Grouping by SHA would put
+  # every commit in its own group, so `cancel-in-progress: true`
+  # never fired and back-to-back pushes queued sequentially.
+  # Falls back to `github.ref` for push/dispatch events (where there
+  # is no `pull_request.number`), so e.g. a `workflow_dispatch` on
+  # the same ref serializes too.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Two jobs on GitHub-hosted Linux: lint-and-build (lint, typecheck, unit
+# test, build, and the fail-closed env-gate) then e2e-tests (full Playwright
+# suite — functional + visual — inside the pinned Playwright container so
+# committed linux baselines compare like-for-like). No coverage upload, no
+# self-hosted runner.
+#
+# No `notify-failure` job: this repository does not hold the Telegram
+# bot secrets (`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`). Add one —
+# modelled on the node's `notify-failure` job — once those secrets
+# are provisioned here.
+jobs:
+  lint-and-build:
+    name: Lint & Build
+    # Skip on draft PRs. Non-PR events (push, workflow_dispatch) always
+    # run: `github.event.pull_request` is absent there, so the
+    # `event_name != 'pull_request'` arm keeps them enabled.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # package.json depends on @zkcoins/sdk via file:../sdk (same layout
+      # as the sibling app monorepo checkout). Hosted runners only get
+      # this repository by default, so checkout both under a parent so
+      # explorer → ../sdk resolves exactly as it does locally.
+      - name: Checkout explorer
+        uses: actions/checkout@v4
+        with:
+          path: explorer
+
+      # Pin the SDK to a commit SHA that carries the exports the explorer
+      # imports (detectTag, digestToBytes, assetIdV1, …). Without a ref this
+      # checks out the SDK default branch, which predates the v1 surface and
+      # fails typecheck. Pinned until a released `@zkcoins/sdk` version exists.
+      - name: Checkout SDK (file:../sdk)
+        uses: actions/checkout@v4
+        with:
+          repository: zk-coins/sdk
+          ref: 8894cfb363e74bdd2ec27b33ec53e72057ee527e
+          path: sdk
+
+      # No `.nvmrc` and no `engines.node` pin in package.json. Node 22 is
+      # what local verification uses (and what the sibling app workflow
+      # pins), so CI matches that rather than inventing a floating "latest".
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            explorer/package-lock.json
+            sdk/package-lock.json
+
+      - name: Build SDK
+        working-directory: sdk
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install dependencies
+        working-directory: explorer
+        run: npm ci
+
+      # next.config.js loads for `next lint` and evaluates the fail-closed
+      # env-gate, so lint/typecheck need the same dummy origin the Build step
+      # uses. This is never a real node; the dedicated negative step below
+      # still proves the gate fails without it.
+      - name: Lint
+        working-directory: explorer
+        run: npm run lint
+        env:
+          NEXT_PUBLIC_NODE_BASE_URL: https://ci-node.example.invalid
+
+      - name: Typecheck
+        working-directory: explorer
+        run: npm run typecheck
+        env:
+          NEXT_PUBLIC_NODE_BASE_URL: https://ci-node.example.invalid
+
+      - name: Test with 100% coverage gate
+        working-directory: explorer
+        run: npm run test:coverage
+        env:
+          NEXT_PUBLIC_NODE_BASE_URL: https://ci-node.example.invalid
+
+      # Dummy origin only — never a real node. next.config.js requires a
+      # non-empty http(s) URL at build time; this value is not used as a
+      # network target in CI (static export, no server runtime).
+      - name: Build
+        working-directory: explorer
+        run: npm run build
+        env:
+          NEXT_PUBLIC_NODE_BASE_URL: https://ci-node.example.invalid
+
+      # Fail-closed contract: NEXT_PUBLIC_NODE_BASE_URL has no default.
+      # A build without it must fail (next.config.js throws). Invert the
+      # exit code so this step cannot go green if the guard is removed or
+      # an env value leaks in. Never `|| true` — that would mask a broken
+      # contract as success.
+      - name: Build without NEXT_PUBLIC_NODE_BASE_URL must fail
+        working-directory: explorer
+        run: |
+          if npm run build; then
+            echo "::error::build succeeded without NEXT_PUBLIC_NODE_BASE_URL; fail-closed contract is broken"
+            exit 1
+          fi
+          echo "build failed as required (fail-closed holds)"
+
+  e2e-tests:
+    name: E2E Tests
+    needs: [lint-and-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same container as regenerate-visual-baselines.yml so the committed
+    # linux baselines compare like-for-like. Pin must move in lockstep with
+    # package.json's @playwright/test version.
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+    steps:
+      - name: Checkout explorer
+        uses: actions/checkout@v4
+        with:
+          path: explorer
+
+      - name: Checkout SDK (file:../sdk)
+        uses: actions/checkout@v4
+        with:
+          repository: zk-coins/sdk
+          ref: 8894cfb363e74bdd2ec27b33ec53e72057ee527e
+          path: sdk
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            explorer/package-lock.json
+            sdk/package-lock.json
+
+      - name: Build SDK
+        working-directory: sdk
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install dependencies
+        working-directory: explorer
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: explorer
+        run: npx playwright install --with-deps chromium
+
+      # Full suite: functional + visual. Chromium carries the Visual
+      # Regression specs; firefox/webkit run the functional-only subset
+      # via playwright.config.ts's per-project grep. Compares against the
+      # committed linux baselines under e2e/*.spec.ts-snapshots/ — a real
+      # UI regression fails the PR here (this is the visual-regression-in-CI
+      # gate). NEXT_PUBLIC_NODE_BASE_URL matches the other steps in this
+      # workflow's dummy-origin convention; playwright.config.ts's own
+      # webServer.env pins the actual test origin regardless.
+      - name: Run E2E suite (functional + visual)
+        working-directory: explorer
+        run: npx playwright test
+        env:
+          NEXT_PUBLIC_NODE_BASE_URL: https://ci-node.example.invalid
+          CI: 'true'
+          HOME: /root
+
+      - name: Upload playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: explorer/playwright-report/
+          retention-days: 7
+
+      - name: Upload E2E test results (diffs/traces)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: explorer/test-results/
+          retention-days: 7

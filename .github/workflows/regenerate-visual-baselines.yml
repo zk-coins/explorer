@@ -1,0 +1,161 @@
+name: Regenerate Visual Baselines
+
+# Manually-dispatched workflow that runs the explorer E2E suite with
+# --update-snapshots and opens a PR with the resulting linux baselines.
+#
+# This is the canonical way to:
+#   - Generate baselines for a brand-new spec.
+#   - Refresh baselines after an intentional UI change.
+#
+# Never edit baselines by hand — always go through this workflow.
+#
+# Runs inside the official Playwright container so committed baselines are
+# reproducible regardless of the host runner image's font/subpixel drift.
+# The container tag MUST be bumped in lockstep with package.json's
+# @playwright/test pin (currently exact 1.62.1 → v1.62.1-noble).
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to update baselines on
+        required: true
+        default: develop
+      spec_glob:
+        description: >-
+          Spec glob(s) to run, space-separated. Defaults to the full
+          numbered suite. Narrow this when only a few specs need
+          fresh baselines.
+        required: false
+        default: e2e/0*.spec.ts e2e/1*.spec.ts
+      tolerate_failures:
+        description: >-
+          Continue to the commit step even if some specs fail.
+          --update-snapshots=all still writes new PNGs for the specs
+          that did run; the commit step picks up only the actually
+          changed files.
+        required: false
+        type: boolean
+        default: false
+
+# Serialize regenerations per target branch. Two concurrent runs against
+# the same branch would race on the auto-commit of the new baselines.
+concurrency:
+  group: regenerate-visual-baselines-${{ inputs.branch }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  regen:
+    name: Regenerate baselines
+    runs-on: ubuntu-latest
+    # Pin must match package.json @playwright/test major.minor.patch base.
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+    timeout-minutes: 45
+    steps:
+      # package.json depends on @zkcoins/sdk via file:../sdk — same layout
+      # as ci.yaml. Checkout both under a parent so explorer → ../sdk resolves.
+      - name: Checkout explorer
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          path: explorer
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pinned to a commit SHA until a released `@zkcoins/sdk` version exists.
+      - name: Checkout SDK (file:../sdk)
+        uses: actions/checkout@v4
+        with:
+          repository: zk-coins/sdk
+          ref: 8894cfb363e74bdd2ec27b33ec53e72057ee527e
+          path: sdk
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            explorer/package-lock.json
+            sdk/package-lock.json
+
+      - name: Build SDK
+        working-directory: sdk
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install dependencies
+        working-directory: explorer
+        run: npm ci
+
+      # Browser binaries ship with the Playwright container image; still
+      # install the matching chromium package for the local @playwright/test.
+      - name: Install Playwright browsers
+        working-directory: explorer
+        run: npx playwright install --with-deps chromium
+
+      - name: Regenerate baselines
+        working-directory: explorer
+        # `--update-snapshots=all` is mandatory because newer Playwright
+        # parses the bare `--update-snapshots` as taking the next CLI arg
+        # as its mode value (and would greedily consume the file pattern).
+        #
+        # Pass user-controllable inputs via env, NOT via `${{ … }}`
+        # template interpolation into the shell script body. Template
+        # interpolation substitutes the literal input string into the
+        # generated bash, which is a textbook CWE-78 command-injection
+        # sink. Reading via `$SPEC_GLOB` / `$TOLERATE` keeps the data
+        # inside the shell's variable expansion, not the parser.
+        env:
+          SPEC_GLOB: ${{ inputs.spec_glob }}
+          TOLERATE: ${{ inputs.tolerate_failures }}
+          CI: 'true'
+          HOME: /root
+        run: |
+          set -euo pipefail
+          # $SPEC_GLOB is intentionally unquoted so the shell expands
+          # the multi-spec glob into separate arguments. Shell-metachars
+          # inside it are still word-split — they are NOT parsed as a
+          # new command, since there is no `eval`.
+          CMD=(npx playwright test --project=chromium --update-snapshots=all)
+          if [[ "$TOLERATE" == "true" ]]; then
+            echo "[regen] tolerate_failures=true — appending '|| true'"
+            "${CMD[@]}" $SPEC_GLOB || true
+          else
+            "${CMD[@]}" $SPEC_GLOB
+          fi
+
+      - name: Commit, push to a side branch, open PR
+        working-directory: explorer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [[ -z "$(git status --porcelain e2e/*-snapshots/)" ]]; then
+            echo "No baseline changes."
+            exit 0
+          fi
+          NEW_BRANCH="e2e/regen-baselines-${{ github.run_id }}"
+          git checkout -b "$NEW_BRANCH"
+          git add e2e/*-snapshots/
+          git commit -m "test(e2e): regenerate visual baselines"
+          git push origin "$NEW_BRANCH"
+          # Open the PR but do NOT try to auto-merge: workflows started by
+          # the GITHUB_TOKEN do not cascade-trigger CI on the new branch
+          # (anti-loop policy), so required status checks never run on the
+          # PR and `gh pr merge --auto` would block indefinitely.
+          PR_BODY="Automated baseline refresh triggered by run ${{ github.run_id }}. Generated from \`${BRANCH}\`@${{ github.sha }}. Merge with \`gh pr merge --admin --squash --delete-branch\` once reviewed."
+          PR_URL=$(gh pr create \
+            --base "$BRANCH" \
+            --head "$NEW_BRANCH" \
+            --title "test(e2e): regenerate visual baselines" \
+            --body "$PR_BODY")
+          echo "::notice title=Baselines PR::$PR_URL"
